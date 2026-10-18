@@ -166,9 +166,9 @@ describe('the table drives the model', () => {
     v.actor.update(3);                                   // the clip is over
     run(v, 0.05);
     assert.equal(v.viewDir, 'UP', 'still held: the escape time has not run out');
-    // the escape time is the extra hold after the clip; the engagement window (one attack interval) outlasts it, so the
-    // model reverts once the fight has really paused
-    run(v, 2.5);
+    // the revert is the targeting frame's call, not a timer: nothing in range -> back to the deployed direction
+    v.setHasTarget(false);
+    run(v, 0.05);
     assert.equal(v.viewDir, null, 'and then it goes back to the deployed direction');
   });
 });

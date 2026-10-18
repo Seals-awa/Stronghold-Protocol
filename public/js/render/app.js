@@ -1798,6 +1798,13 @@ export async function createFieldView(host, options = {}) {
         fx.leak();
         break;
       }
+      case 'tgt': {
+        // the sim's targeting frame: 1 = engaged, 0 = nothing in range (the model then goes back to its deployed direction
+        // once its attack clip is over 鈥?no timer involved)
+        const v = views.get(e[1]);
+        if (v && typeof v.setHasTarget === 'function') v.setHasTarget(!!e[2]);
+        break;
+      }
       case 'status': { const v = views.get(e[1]); if (v) { v.onStatus?.(e[2], !!e[3]); wiring.status(v, e[2], !!e[3]); } break; }
       case 'fx': {
         if (e[1] === 'copy' && e[4]?.id != null && e[4]?.src != null) {

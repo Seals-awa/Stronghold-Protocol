@@ -740,6 +740,8 @@ export class UnitView {
     // seconds since this unit's last attack: a target that just died is replaced within one attack interval, and the model
     // must not swing back to the deployed direction in that gap (it would sweep left -> right -> left for no reason)
     this.sinceAtk = Infinity;
+    // the sim's targeting frame (b.ev ['tgt', id, on]): no target -> the facing goes back to `dir` once the clip is over
+    this.hasTarget = true;
     this.shake = 0;
     this.screen = { x: 0, y: 0, s: 1, top: 0 };
     this.placed = false;          // set by the first update's projection: until then `screen` is not on screen (bounds)
@@ -1509,13 +1511,14 @@ export class UnitView {
   }
 
   /**
-   * Still in the fight: the last attack was less than about one interval ago, so a dead target is being replaced and the
-   * model keeps the facing it has. Only a real pause (no attack for over an interval) lets it revert to `dir`.
-   * @returns {boolean}
+   * The sim's targeting frame (`b.ev` ['tgt', id, on]): whether this unit has a target right now. The facing reverts to
+   * the deployed direction as soon as the attack clip is over AND the targeting frame found nothing 鈥?there is no timer.
+   * @param {boolean} on
    */
-  _engaged() {
-    const iv = Number(this.atkInterval) > 0 ? Number(this.atkInterval) : 1.2;
-    return Number.isFinite(this.sinceAtk) && this.sinceAtk < iv * 1.25;
+  setHasTarget(on) {
+    this.hasTarget = !!on;
+    // the clip may already be over: 鍥炴 now (the targeting frame is what decides, not a countdown)
+    if (!this.hasTarget && this.viewDir && !this._heldFacing() && !this._attackPlaying()) this.clearFacing();
   }
 
   /** True while the model's attack clip is still playing (the facing is kept until it ends). */
@@ -1803,7 +1806,7 @@ export class UnitView {
     // 回正: the attack animation is over and nothing follows → face the deployed direction again. A stunned / frozen /
     // sleeping operator keeps the facing it had (its stun clip plays in place).
     this.sinceAtk = Number.isFinite(this.sinceAtk) ? this.sinceAtk + (Number.isFinite(dt) ? Math.max(0, dt) : 0) : Infinity;
-    if (this.viewDir && !this._heldFacing() && !this._attackPlaying() && !this._engaged()) {
+    if (this.viewDir && !this._heldFacing() && !this._attackPlaying() && !this.hasTarget) {
       // the row's escapeTime: the facing is kept that long after the clip (10-face-modes.json), else it goes back at once
       if (!this._faceHoldArmed) {                    // armed once per turn, then it counts down
         this._faceHoldArmed = true;
