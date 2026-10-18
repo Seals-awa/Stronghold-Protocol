@@ -26,22 +26,45 @@ export const FACING_TURN_S = 0.15;      // 换骨架 + 镜像 + 换动画 takes 
 /** Direction names as the sim / renderer spell them (UP is +row: the board's "up" is a bigger row). */
 const UP = 'UP', DOWN = 'DOWN', LEFT = 'LEFT', RIGHT = 'RIGHT';
 
+// --- the official direction test (the operator's rule, reconstructed from the client's own chain) ---------------------
+// The client's `_SetFourDirection` picks a direction from the target offset with these thresholds; `faceToBack` is simply
+// "the direction is Up" (see `UnitView._wantsBack` / `_wantsBackFor`).
+/** Horizontal / vertical tolerance of the four-direction test (TOLERANCE). */
+export const FACING_TOLERANCE = 0.2;
+/** The extra band added to it (ADDON): past TOLERANCE + ADDON tiles sideways the model stays level. */
+export const FACING_ADDON = 0.25;
+/** Closer than this (in tiles) the client judges no direction at all and keeps the facing the model has. */
+export const FACING_TOO_CLOSE = 0.25;
+/** Both offsets below this are "no direction". */
+export const FACING_ZERO = 0.01;
+
 /**
- * The direction to draw a model in for a target offset (dx = right, dy = up, in tiles). Vertical only past ~60° off the
- * horizontal — the owner's rule ("敌人在上方约 >60° 才朝上转"): a 45° diagonal keeps the model level. A target that hugs
- * the unit (a blocked enemy within a tile) reads as vertical as soon as it is at least as far up/down as sideways: that is
- * the only angle a melee operator ever shows.
+ * The direction to draw a model in for a target offset (dx = right, dy = up, in tiles) — the operator's rule:
+ *
+ *   1. `dx² + dy² < 0.25²` → too close: no direction, the model keeps the facing it has;
+ *   2. both `|dx|` and `|dy|` below 0.01 → no direction;
+ *   3. horizontal first: `|dx| >= TOLERANCE + ADDON` (0.45 tiles) is level — LEFT / RIGHT;
+ *   4. otherwise the narrow band around vertical: `|dy| > |dx|` is UP / DOWN; a target that is wider than it is tall stays
+ *      level even inside the band.
+ *
+ * So "up" is a narrow strip straight above / below (sideways offset under 0.45 tiles), not a 45° cone, and a target that
+ * hugs the unit (< 0.25 tiles) turns nothing — which is why turning up is rarely seen in game.
+ *
+ * [ASSUMED] step 3's exact form: the client compares `|dx|` against `TOLERANCE + ADDON` (the alternative reading applies
+ * one constant per axis). The owner's description — "the up band is ±0.2–0.45 tiles, and only when the vertical offset is
+ * larger" — is what this implements.
+ *
  * @param {number} dx
  * @param {number} dy
- * @returns {'UP'|'DOWN'|'LEFT'|'RIGHT'|null} null when the target is on the unit's own tile
+ * @returns {'UP'|'DOWN'|'LEFT'|'RIGHT'|null} null = no direction (keep the facing)
  */
 export function facingDir(dx, dy) {
   const c = Number(dx) || 0, r = Number(dy) || 0;
   const ac = Math.abs(c), ar = Math.abs(r);
-  if (ac < 1e-6 && ar < 1e-6) return null;
-  const close = Math.max(ac, ar) < 1 - 1e-6;
-  const vertical = close ? ar >= ac - 1e-9 : ar > 1.7320508075688772 * ac;   // tan 60°
-  if (vertical) return r > 0 ? UP : DOWN;
+  if (ac * ac + r * r < FACING_TOO_CLOSE * FACING_TOO_CLOSE) return null;      // too close: keep the facing
+  if (ac < FACING_ZERO && ar < FACING_ZERO) return null;                       // no direction
+  if (ac >= FACING_TOLERANCE + FACING_ADDON) return c > 0 ? RIGHT : LEFT;      // far enough sideways: level
+  if (ar > ac) return r > 0 ? UP : DOWN;                                       // the narrow up / down band
   return c > 0 ? RIGHT : LEFT;
 }
 
