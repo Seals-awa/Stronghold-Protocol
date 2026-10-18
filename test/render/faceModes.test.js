@@ -13,10 +13,12 @@ import { presetCamera } from '../../public/js/render/projection.js';
 import { FACE_MODES } from '../../public/js/render/faceModes.js';
 import { faceModeFlags, faceModeRow } from '../../public/js/render/facing.js';
 
-let fake, UnitView;
+let fake, UnitView, facingMod;
+const mods = () => facingMod;
 before(async () => {
   fake = installFakePixi();
   ({ UnitView } = await import('../../public/js/render/units.js'));
+  facingMod = await import('../../public/js/render/facing.js');
 });
 after(() => fake.restore());
 
@@ -171,4 +173,41 @@ describe('the table drives the model', () => {
     run(v, 0.05);
     assert.equal(v.viewDir, null, 'and then it goes back to the deployed direction');
   });
+});
+describe('a skill drives the facing while it runs (野鬃 S2 / 深巡 S2 keep the deployed direction)', () => {
+  test('the resolver takes the skill row: Skill_2 covers the loop that actually plays', () => {
+    const { faceModeFor } = mods();
+    const wild = FACE_MODES.char_496_wildmn;          // rows: Attack / Skill_1_Loop / Skill_2 (the cast, no _Loop row)
+    const deep = FACE_MODES.char_4137_udflow;          // rows: Skill_2_Loop / Attack / Skill_2_Loop
+    const flags = (row) => faceModeFlags(row && row[1]);
+    // during the skill: the skill row, which keeps the deployed direction
+    assert.ok(flags(faceModeFor(wild, ['Skill_2_Loop', 'Skill_2', 'Attack'])).def, '野鬃 S2 -> Default');
+    assert.ok(flags(faceModeFor(deep, ['Skill_2_Loop', 'Skill_2', 'Attack'])).def, '深巡 S2 -> Default');
+    // without a skill: the attack row still turns toward the target
+    assert.ok(flags(faceModeFor(wild, ['Attack'])).target);
+    assert.ok(flags(faceModeFor(deep, ['Attack'])).target);
+  });
+
+  for (const id of ['char_496_wildmn', 'char_4137_udflow']) {
+    test(`${id}: during S2 the model goes back to the deployed direction and does not turn`, async () => {
+      const v = await view(id, { dir: 'RIGHT', skillIndex: 2 });
+      // first attack while no skill runs: the model turns toward the target (the attack row is Target)
+      assert.equal(v.windUp(0.4, 'none'), true);
+      assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true);
+      assert.equal(v.viewDir, 'LEFT');
+      // the skill comes on: its row keeps the facing, so the model turns back to the deployed direction at once
+      v.setSkill(true);
+      assert.equal(v.viewDir, null, 'deployed direction again for the whole skill');
+      await tick();
+      // and no attack during the skill may turn it
+      assert.equal(v.windUp(0.4, 'none'), true);
+      assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), false, 'S2 keeps the deployed direction');
+      assert.equal(v.viewDir, null);
+      // the skill ends: the attack row is back in charge
+      v.setSkill(false);
+      await tick();
+      assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true, 'after the skill the model turns again');
+      assert.equal(v.viewDir, 'LEFT');
+    });
+  }
 });

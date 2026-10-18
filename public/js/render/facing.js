@@ -118,15 +118,41 @@ export function faceModeFlags(mode) {
  * @returns {any[]|null}
  */
 export function faceModeRow(rows, clip) {
+  return faceModeFor(rows, [clip]);
+}
+
+/**
+ * The row that drives the clip set running now, from a list of candidate animation names in priority order: the first exact
+ * match wins, then the ability default (`animKey: ''`). Several candidates are needed because the official table names the
+ * CLIP of an ability 鈥?a skill's row may be `Skill_2` while the loop that actually plays is `Skill_2_Loop` (閲庨瑑 S2), and an
+ * attack row may name `Attack` while the clip is `Attack_A`.
+ * @param {any[][]|undefined|null} rows the operator's rows (FACE_MODES[charId])
+ * @param {string[]} candidates animation names, most specific first
+ * @returns {any[]|null}
+ */
+export function faceModeFor(rows, candidates) {
   if (!Array.isArray(rows) || !rows.length) return null;
-  const name = String(clip || '');
   let fallback = null;
   for (const row of rows) {
-    if (!Array.isArray(row)) continue;
-    if (name && row[0] === name) return row;
-    if (!row[0] && !fallback) fallback = row;
+    if (Array.isArray(row) && !row[0] && !fallback) { fallback = row; break; }
   }
-  return fallback;
+  for (const cand of candidates) {
+    const name = String(cand || '');
+    if (!name) continue;
+    for (const row of rows) if (Array.isArray(row) && row[0] === name) return row;
+  }
+  // soft match: a row whose animKey is a prefix of a candidate (Skill_2 covers Skill_2_Loop), longest row key first
+  const list = candidates.map((c) => String(c || '')).filter(Boolean);
+  let best = null;
+  for (const row of rows) {
+    if (!Array.isArray(row) || !row[0]) continue;
+    for (const cand of list) {
+      if (cand === row[0] || cand.startsWith(row[0] + '_')) {
+        if (!best || row[0].length > best[0].length) best = row;
+      }
+    }
+  }
+  return best || fallback;
 }
 
 /**

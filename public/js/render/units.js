@@ -88,7 +88,7 @@ import { MANIFOLD, isManifold, manifoldCopyForm, manifoldAttackForm } from './ma
 import { diamondTexture, shadowTexture, fxAtlas, tierChip, statusTexture, itemTexture, hudRings, ringArc, downLabel, HUD_DISC, ELEMENT_RING } from './textures.js';
 import { COLORS, TIER_COLORS, ENEMY_FRAME, UNIT, PROJ, statusIconKey, statusIconSuppressed } from './style.js';
 import { drawCrate, rowDepthKey, ROW_KEY, deviceBoxOf, DEVICE_BOX } from './tiles.js';
-import { facingToward, FACING_TURN_S, HELD_FACING, faceModeFlags, faceModeRow } from './facing.js';
+import { facingToward, FACING_TURN_S, HELD_FACING, faceModeFlags, faceModeFor } from './facing.js';
 import { FACE_MODES } from './faceModes.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -1461,8 +1461,34 @@ export class UnitView {
    */
   _faceMode() {
     const clip = String(this.actor?.current || '');
-    const row = faceModeRow(this.faceRows, clip);
+    const skill = this._skillClipCandidates();
+    // a skill that is running drives the facing (閲庨瑑 S2 / 娣卞贰 S2 are `Default`: the model keeps the deployed direction);
+    // otherwise the attack clip that is about to start does, then whatever is playing now
+    const attack = this._attackClipName();
+    // the clip PLAYING now outranks the attack clip while a skill runs: the skill loop is what the table names
+    const candidates = [...skill, clip, attack, 'Attack'].filter(Boolean);
+    const row = faceModeFor(this.faceRows, candidates);
     return { row, flags: faceModeFlags(row?.[1]), clip };
+  }
+
+  /** The animation names of the skill running now (`Skill_2_Loop`, `Skill_2`, `Skill_Loop`), or none. */
+  _skillClipCandidates() {
+    if (!this.statuses || !this.statuses.has('skill')) return [];
+    const n = Number(this.info && this.info.skillIndex);
+    const out = [];
+    if (Number.isInteger(n) && n > 0) out.push(`Skill_${n}_Loop`, `Skill_${n}`);
+    out.push('Skill_Loop', 'Skill');
+    return out;
+  }
+
+  /** The attack clip the next wind-up would play (`roles.attack.loop`, else 'Attack'). */
+  _attackClipName() {
+    const a = this.actor;
+    if (a && typeof a._attackClip === 'function') {
+      const clip = a._attackClip();
+      if (clip && clip.loop) return String(clip.loop);
+    }
+    return 'Attack';
   }
 
   /** FirstCastTarget: the target the clip was first cast at, kept while that same clip plays. */
@@ -1617,6 +1643,12 @@ export class UnitView {
   setSkill(on) {
     if (on) this.statuses.add('skill'); else this.statuses.delete('skill');
     if (this.actor) this.actor.setSkill(on);
+    // a skill whose row keeps the facing (`none` / `Default`, e.g. 閲庨瑑 S2, 娣卞贰 S2) means the model faces its deployed
+    // direction for the whole skill: turn back now instead of waiting for an attack to notice
+    if (on && this.viewDir) {
+      const mode = this._faceMode();
+      if (mode.flags.none || mode.flags.def) this.clearFacing();
+    }
   }
 
   /**
