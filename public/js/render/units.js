@@ -697,6 +697,7 @@ export class UnitView {
     this._flipT = 1;              // 1 = settled (no turnaround running)
     this._flipDur = 0;
     this._flipSwap = false;       // the Front ⇄ Back swap is still owed at the sweep's midpoint
+    this._flipDir = this.dir || 'RIGHT';      // the direction the running sweep heads for
     // The official per-ability face modes (render/faceModes.js, generated from the owner's 10-face-modes.json): how this
     // operator's model is driven while each of its ability animations plays (Target / none / Default / Front /
     // FirstCastTarget / ForceToDirection / CheckDownAttack), plus the direction-specific clips some of them play.
@@ -736,6 +737,9 @@ export class UnitView {
     this.bob = Math.random() * Math.PI * 2;
     this.hovered = false; this.dimmed = false; this.lift = 0;
     this.lastAtk = -1; this.atkInterval = defaultInterval(ctx, info);
+    // seconds since this unit's last attack: a target that just died is replaced within one attack interval, and the model
+    // must not swing back to the deployed direction in that gap (it would sweep left -> right -> left for no reason)
+    this.sinceAtk = Infinity;
     this.shake = 0;
     this.screen = { x: 0, y: 0, s: 1, top: 0 };
     this.placed = false;          // set by the first update's projection: until then `screen` is not on screen (bounds)
@@ -1395,6 +1399,7 @@ export class UnitView {
     const swap = !frontOnly && this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
     this._flipFrom = Number.isFinite(from) ? from : this._flip;
     this._flipTo = dir === 'LEFT' ? -1 : 1;
+    this._flipDir = dir;                     // the direction this sweep is heading for (a retarget can already be there)
     // the sweep has to be over by the strike frame: a wind-up accepted 0.1 s before the strike gets a 0.1 s turn
     this._flipDur = Number.isFinite(lead) && lead > 0 ? Math.min(FACING_TURN_S, lead) : FACING_TURN_S;
     this._flipT = 0;
@@ -1435,7 +1440,12 @@ export class UnitView {
     }
     // none / Default: the animation plays in whatever facing the model already has
     if (mode.flags.none || mode.flags.def) return false;
+    // FIRST the direction, THEN the turn: when the new target (the old one died) already lies in the
+    // direction the model is drawn in - the facing it holds, or the one a sweep still running is heading
+    // for - there is nothing to turn. Compared by NAME: UP / DOWN are not LEFT / RIGHT even though they
+    // share a horizontal sign. Without this a retarget in the same direction swept the model for nothing.
     if (d === (this.viewDir || (this.isEnemy ? (this.visFacing < 0 ? 'LEFT' : 'RIGHT') : this.dir))) return false;
+    if (this._flipT < 1 && this._flipDir === d) return false;
     const from = this.modelFlip() * (this.mirrorX ? -1 : 1);
     this.viewDir = d;
     this._faceRow = mode.row;
@@ -1498,6 +1508,16 @@ export class UnitView {
     return dx < 0 ? 'LEFT' : 'RIGHT';
   }
 
+  /**
+   * Still in the fight: the last attack was less than about one interval ago, so a dead target is being replaced and the
+   * model keeps the facing it has. Only a real pause (no attack for over an interval) lets it revert to `dir`.
+   * @returns {boolean}
+   */
+  _engaged() {
+    const iv = Number(this.atkInterval) > 0 ? Number(this.atkInterval) : 1.2;
+    return Number.isFinite(this.sinceAtk) && this.sinceAtk < iv * 1.25;
+  }
+
   /** True while the model's attack clip is still playing (the facing is kept until it ends). */
   _attackPlaying() {
     const a = this.actor;
@@ -1543,6 +1563,7 @@ export class UnitView {
         if (d > 0.05 && d < 6) this.atkInterval = this.atkInterval * 0.6 + d * 0.4;
       }
       this.lastAtk = now;
+      this.sinceAtk = 0;
     }
     if (target && this.isEnemy) {
       const dx = target.x - this.x;
@@ -1583,6 +1604,7 @@ export class UnitView {
     if (!this.alive || !this.actor || !this.spineReady) return false;
     this._attackForm(kind);
     const ok = this.actor.windUp(this.atkInterval, lead, !!PROJ[kind]?.once);
+    if (ok) this.sinceAtk = 0;      // in the fight: the facing is kept until a real pause (no revert between targets)
     if (ok && this.imp) this.imp.dirty = true;
     return ok;
   }
@@ -1780,7 +1802,8 @@ export class UnitView {
     }
     // 回正: the attack animation is over and nothing follows → face the deployed direction again. A stunned / frozen /
     // sleeping operator keeps the facing it had (its stun clip plays in place).
-    if (this.viewDir && !this._heldFacing() && !this._attackPlaying()) {
+    this.sinceAtk = Number.isFinite(this.sinceAtk) ? this.sinceAtk + (Number.isFinite(dt) ? Math.max(0, dt) : 0) : Infinity;
+    if (this.viewDir && !this._heldFacing() && !this._attackPlaying() && !this._engaged()) {
       // the row's escapeTime: the facing is kept that long after the clip (10-face-modes.json), else it goes back at once
       if (!this._faceHoldArmed) {                    // armed once per turn, then it counts down
         this._faceHoldArmed = true;

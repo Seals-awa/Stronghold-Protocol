@@ -191,10 +191,13 @@ describe('held facing, and going back to the deployed direction', () => {
     v.faceTarget(at(4, 12), false, { lead: 0.4 });
     run(v, 0.6);
     assert.equal(v.viewDir, 'UP', 'still in the attack clip / its recovery');
-    // let the clip finish: the actor leaves attack mode and the revert starts
+    // let the clip finish: the actor leaves attack mode, but the unit is still in the fight (a retarget may follow), so the
+    // facing is kept until a real pause longer than one attack interval
     v.actor.update(3);
     run(v, 0.05);
-    assert.equal(v.viewDir, null, '回正 once the attack animation is over');
+    assert.equal(v.viewDir, 'UP', 'still engaged: the facing is kept');
+    run(v, 2.5);
+    assert.equal(v.viewDir, null, '回正 once the fight pauses');
     assert.equal(v.modelFlip(), 1);
     run(v, FACING_TURN_S);
     await tick(); await tick();              // the Front model loads asynchronously
@@ -268,6 +271,46 @@ describe('enemies turn too (left / right only: no Back model)', () => {
     assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), false, 'already facing it');
     v.actor.update(3);                               // the clip ends
     run(v, 0.05);
+    assert.equal(v.viewDir, 'LEFT', 'still in the fight: the facing is kept (a retarget may follow)');
+    run(v, 2.5);                                     // a real pause, longer than one attack interval
     assert.equal(v.viewDir, null, 'back to the velocity rule');
+  });
+});
+describe('a dead target is replaced first, then the model decides', () => {
+  test('a new target in the SAME direction does not turn the model again (no left -> right -> left sweep)', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true);   // a target to the left
+    assert.equal(v.viewDir, 'LEFT');
+    run(v, 0.2);
+    v.actor.update(3);                                                  // that target dies mid-swing, the clip ends
+    run(v, 0.05);
+    assert.equal(v.viewDir, 'LEFT', 'still engaged: no revert to the deployed RIGHT in the gap');
+    // the next target is also to the left: the direction is already right, so no sweep at all
+    v.windUp(0.4, 'none');
+    assert.equal(v.faceTarget(at(1.5, 9), false, { lead: 0.4 }), false, 'same direction: nothing to turn');
+    assert.equal(v.viewDir, 'LEFT');
+    assert.equal(v._flipT, 1, 'and no transition was started');
+  });
+
+  test('a new target in another direction does turn it', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true);
+    run(v, 0.2);
+    v.actor.update(3);
+    run(v, 0.05);
+    v.windUp(0.4, 'none');
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.4 }), true, 'the new target is above');
+    assert.equal(v.viewDir, 'UP');
+  });
+
+  test('a pause in the fight gives the deployed direction back', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true);
+    v.actor.update(3);
+    run(v, 2.5);                                        // longer than one attack interval
+    assert.equal(v.viewDir, null, '回正 after the fight paused');
   });
 });
