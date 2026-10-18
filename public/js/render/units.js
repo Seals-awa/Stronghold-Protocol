@@ -88,7 +88,8 @@ import { MANIFOLD, isManifold, manifoldCopyForm, manifoldAttackForm } from './ma
 import { diamondTexture, shadowTexture, fxAtlas, tierChip, statusTexture, itemTexture, hudRings, ringArc, downLabel, HUD_DISC, ELEMENT_RING } from './textures.js';
 import { COLORS, TIER_COLORS, ENEMY_FRAME, UNIT, PROJ, statusIconKey, statusIconSuppressed } from './style.js';
 import { drawCrate, rowDepthKey, ROW_KEY, deviceBoxOf, DEVICE_BOX } from './tiles.js';
-import { facingToward, FACING_TURN_S, HELD_FACING } from './facing.js';
+import { facingToward, FACING_TURN_S, HELD_FACING, faceModeFlags, faceModeRow } from './facing.js';
+import { FACE_MODES } from './faceModes.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const DIRS = ['UP', 'RIGHT', 'DOWN', 'LEFT'];
@@ -696,6 +697,15 @@ export class UnitView {
     this._flipT = 1;              // 1 = settled (no turnaround running)
     this._flipDur = 0;
     this._flipSwap = false;       // the Front ⇄ Back swap is still owed at the sweep's midpoint
+    // The official per-ability face modes (render/faceModes.js, generated from the owner's 10-face-modes.json): how this
+    // operator's model is driven while each of its ability animations plays (Target / none / Default / Front /
+    // FirstCastTarget / ForceToDirection / CheckDownAttack), plus the direction-specific clips some of them play.
+    this.faceRows = FACE_MODES[this.info.spine || this.info.defId] || FACE_MODES[this.info.defId] || null;
+    this._faceRow = null;         // the row that started the turn now (its escapeTime is the revert delay)
+    this._faceFirst = null;       // FirstCastTarget: the target the clip playing now was cast at
+    this._faceClip = '';          // the clip _faceFirst belongs to
+    this._faceHold = 0;           // seconds the facing is still kept after that clip ended
+    this._faceHoldArmed = false;   // the escapeTime of the row above has been read for this turn
     this.hp = Number(info.maxHp) || 1; this.maxHp = Number(info.maxHp) || 1; this.ghostHp = this.hp;
     this.sp = 0; this.spMax = 0;
     this.ammo = null;             // [rounds left, rounds in the magazine] while an ammo skill runs (sync; b.snap `ammo`)
@@ -1381,8 +1391,8 @@ export class UnitView {
    * @param {'UP'|'DOWN'|'LEFT'|'RIGHT'} dir
    * @param {number} lead game seconds between the animation start and the strike
    */
-  _startTurn(dir, lead = 0, instant = false, forceSwap = false, from = null) {
-    const swap = this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
+  _startTurn(dir, lead = 0, instant = false, forceSwap = false, from = null, frontOnly = false) {
+    const swap = !frontOnly && this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
     this._flipFrom = Number.isFinite(from) ? from : this._flip;
     this._flipTo = dir === 'LEFT' ? -1 : 1;
     this._flipDur = FACING_TURN_S;
@@ -1407,12 +1417,55 @@ export class UnitView {
   faceTarget(target, multi = false, opts = {}) {
     if (this.destroyed || multi || this.fixedFacing) return false;
     if (this._heldFacing()) return false;
+    // the official per-ability mode (render/faceModes.js): an animation driven by `none` / `Default` plays in whatever
+    // facing the model has, `Front` never uses the Back model, and the ForceToDirection rows play a direction-specific clip
+    const mode = this._faceMode();
     // an enemy has no deploy direction and no Back model: it only turns left / right, toward the target it is hitting
-    const d = this.isEnemy ? this._enemyTurnDir(target) : facingToward(this, target);
-    if (!d || d === (this.viewDir || (this.isEnemy ? (this.visFacing < 0 ? 'LEFT' : 'RIGHT') : this.dir))) return false;
+    const aim = mode.flags.firstCast ? this._firstCastTarget(target, mode.clip) : target;
+    const d = this.isEnemy ? this._enemyTurnDir(aim) : facingToward(this, aim);
+    if (!d) return false;
+    if (mode.flags.forceDir || mode.flags.checkDown) {
+      const clip = (d === 'UP' ? mode.row?.[2] : d === 'DOWN' ? mode.row?.[3] : '') || '';
+      if (clip && this._playFaceClip(clip)) return true;    // the direction-specific clip is drawn by the skeleton
+    }
+    // none / Default: the animation plays in whatever facing the model already has
+    if (mode.flags.none || mode.flags.def) return false;
+    if (d === (this.viewDir || (this.isEnemy ? (this.visFacing < 0 ? 'LEFT' : 'RIGHT') : this.dir))) return false;
     const from = this.modelFlip() * (this.mirrorX ? -1 : 1);
     this.viewDir = d;
-    this._startTurn(d, Number(opts.lead) || 0, opts.instant === true, false, from);
+    this._faceRow = mode.row;
+    this._startTurn(d, Number(opts.lead) || 0, opts.instant === true, false, from, mode.flags.front);
+    return true;
+  }
+
+  /**
+   * The face-mode row driving the clip playing now, its flags, and that clip's name (render/facing.js faceModeRow).
+   * @returns {{ row: any[]|null, flags: ReturnType<typeof faceModeFlags>, clip: string }}
+   */
+  _faceMode() {
+    const clip = String(this.actor?.current || '');
+    const row = faceModeRow(this.faceRows, clip);
+    return { row, flags: faceModeFlags(row?.[1]), clip };
+  }
+
+  /** FirstCastTarget: the target the clip was first cast at, kept while that same clip plays. */
+  _firstCastTarget(target, clip) {
+    if (this._faceClip !== clip) { this._faceClip = clip; this._faceFirst = target || null; }
+    return this._faceFirst || target;
+  }
+
+  /**
+   * Play a direction-specific clip of the animation playing now (`Attack_Down`, `Skill_1_Loop_Down`, 鈥? instead of turning
+   * the model. Only when the skeleton really has it; the clip is swapped in place, keeping the current loop state.
+   * @param {string} name
+   * @returns {boolean} whether it was played
+   */
+  _playFaceClip(name) {
+    const a = this.actor;
+    if (!a || typeof a._play !== 'function' || !a.has || !a.has(name)) return false;
+    if (a.current === name) return true;
+    a._play(name, a.mode === 'attack' ? false : true, { mix: 0.06 });
+    if (this.imp) this.imp.dirty = true;
     return true;
   }
 
@@ -1421,6 +1474,8 @@ export class UnitView {
     if (!this.viewDir) return;
     if (this.isEnemy) { this.viewDir = null; this._settleFlip(); return; }   // back to the velocity rule
     this.viewDir = null;
+    this._faceRow = null;
+    this._faceHoldArmed = false;
     this._startTurn(this.dir, 0, false, true);      // 回正: always the deployed model, no strike to protect
   }
 
@@ -1706,7 +1761,15 @@ export class UnitView {
     }
     // 回正: the attack animation is over and nothing follows → face the deployed direction again. A stunned / frozen /
     // sleeping operator keeps the facing it had (its stun clip plays in place).
-    if (this.viewDir && !this._heldFacing() && !this._attackPlaying()) this.clearFacing();
+    if (this.viewDir && !this._heldFacing() && !this._attackPlaying()) {
+      // the row's escapeTime: the facing is kept that long after the clip (10-face-modes.json), else it goes back at once
+      if (!this._faceHoldArmed) {                    // armed once per turn, then it counts down
+        this._faceHoldArmed = true;
+        this._faceHold = Number(this._faceRow?.[4]) > 0 ? Number(this._faceRow[4]) : 0;
+      }
+      if (this._faceHold <= 0) this.clearFacing();
+      else this._faceHold -= Number.isFinite(dt) ? Math.max(0, dt) : 0;
+    }
     // a failed / timed-out model load is tried again once its wait is over (SPINE_RETRY_MS; frames only: never hidden)
     if (this._retryAt && nowMs() >= this._retryAt) { this._retryAt = 0; if (!this.actor && !this._spineBusy) this._loadSpine(true); }
     // a load begun in a hidden tab and still in flight SPINE_STUCK_MS after it came back: started again (GitHub #68)
@@ -2744,3 +2807,4 @@ export class DeviceView {
     this.hud.destroy({ children: true });
   }
 }
+

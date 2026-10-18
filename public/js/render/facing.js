@@ -80,6 +80,55 @@ const BOUNCE = new Set(['chain', 'chainHeal']);
 /** Live-facing states in which the official client keeps the model exactly as it is (its stun clip plays in place). */
 export const HELD_FACING = ['stun', 'sleep', 'freeze'];
 
+// --- the per-ability face modes (10-face-modes.json, generated into render/faceModes.js) -------------------------------
+// Every operator's facing is not one rule: the official client stores, per ability animation, how the model is driven
+// while that animation plays. The flags below are the parts of that table this renderer uses.
+//   Target            turn the model toward the target of the attack (the default)
+//   none              never turn (the animation plays in whatever facing the model has)
+//   Default           keep the deployed facing while the clip plays
+//   Front             never use the Back model, even when facing up (mirror only)
+//   ForceToDirection  play the direction-specific clip (row `up` / `down`) instead of turning
+//   FirstCastTarget   keep facing the first target the clip was cast at
+//   CheckDownAttack   with FirstCastTarget: a target below plays the `down` clip
+/**
+ * The flags of a table `mode` string (`'Default+ForceToDirection'` → `{ default: true, forceDir: true, … }`).
+ * @param {string} mode
+ * @returns {{ target: boolean, none: boolean, def: boolean, front: boolean, forceDir: boolean, firstCast: boolean, checkDown: boolean }}
+ */
+export function faceModeFlags(mode) {
+  const m = String(mode || 'Target');
+  const has = (k) => m === k || m.split('+').includes(k);
+  const target = has('Target');
+  return {
+    target,
+    none: has('none'),
+    def: has('Default'),
+    front: has('Front'),
+    forceDir: has('ForceToDirection'),
+    firstCast: has('FirstCastTarget'),
+    checkDown: has('CheckDownAttack'),
+  };
+}
+
+/**
+ * The table row that drives a given clip: an exact `animKey` match wins, then the ability's default row (`animKey: ''`),
+ * so a skill animation uses that operator's own default when the table has no row for its exact clip.
+ * @param {any[][]|undefined|null} rows the operator's rows (`FACE_MODES[charId]`)
+ * @param {string} [clip] the clip playing now (SpineActor.current)
+ * @returns {any[]|null}
+ */
+export function faceModeRow(rows, clip) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const name = String(clip || '');
+  let fallback = null;
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    if (name && row[0] === name) return row;
+    if (!row[0] && !fallback) fallback = row;
+  }
+  return fallback;
+}
+
 /**
  * Plan the look-ahead window: every queued event in ascending time order, with the ATTACKS grouped by **one attack** and
  * the area ones marked.
