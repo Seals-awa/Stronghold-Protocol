@@ -1395,7 +1395,8 @@ export class UnitView {
     const swap = !frontOnly && this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
     this._flipFrom = Number.isFinite(from) ? from : this._flip;
     this._flipTo = dir === 'LEFT' ? -1 : 1;
-    this._flipDur = FACING_TURN_S;
+    // the sweep has to be over by the strike frame: a wind-up accepted 0.1 s before the strike gets a 0.1 s turn
+    this._flipDur = Number.isFinite(lead) && lead > 0 ? Math.min(FACING_TURN_S, lead) : FACING_TURN_S;
     this._flipT = 0;
     this._flipSwap = swap && !instant;     // an instant turn swaps now, before the clip starts
     this.visFacing = this._flipTo;
@@ -1427,7 +1428,7 @@ export class UnitView {
     // THE TURN MUST FINISH BEFORE THE STRIKE (FACING_TURN_S): a turn that cannot be over by then would still be running
     // during the swing — which is exactly what "the model turns while the attack clip is playing" was. With too little
     // lead the facing is left alone; the next attack, with a full look-ahead, turns it.
-    if (Number.isFinite(opts.lead) && opts.lead < FACING_TURN_S) return false;
+    if (Number.isFinite(opts.lead) && opts.lead <= 0) return false;
     if (mode.flags.forceDir || mode.flags.checkDown) {
       const clip = (d === 'UP' ? mode.row?.[2] : d === 'DOWN' ? mode.row?.[3] : '') || '';
       if (clip && this._playFaceClip(clip)) return true;    // the direction-specific clip is drawn by the skeleton

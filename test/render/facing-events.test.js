@@ -154,13 +154,18 @@ describe('the turn happens when the animation starts, and only then', () => {
     assert.equal(v.viewDir, before, 'onAttack never turns now: its clip starts at the strike frame');
   });
 
-  test('a turn that cannot finish before the strike is skipped (no turning during the swing)', async () => {
+  test('a turn is compressed to the lead there is, so it is always over by the strike', async () => {
+    // a wind-up is only accepted close to its strike frame (lead * ts <= hit), so the lead can be well under the 0.15 s
+    // the full turn takes: the sweep is shortened instead of refused (a refusal left most operators never turning)
     const { v } = await ally({ dir: 'RIGHT' });
     assert.equal(v.windUp(0.4, 'none'), true);                 // the clip is playing now
-    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.05 }), false, 'too little lead: 0.15 s cannot pass before the strike');
-    assert.equal(v.viewDir, null);
-    // and the next attack, with a full look-ahead, does turn it
-    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.4 }), true);
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.05 }), true);
+    assert.equal(v.viewDir, 'UP');
+    assert.ok(v._flipDur <= 0.05 + 1e-9, `the sweep lasts the lead: ${v._flipDur}`);
+    // a full lead keeps the full 0.15 s turnaround
+    const { v: v2 } = await ally({ dir: 'RIGHT' });
+    assert.equal(v2.faceTarget(at(4, 12), false, { lead: 0.4 }), true);
+    assert.equal(v2._flipDur, FACING_TURN_S);
   });
 });
 
