@@ -209,3 +209,46 @@ describe('Front / Back model switch while a skill clip is on', () => {
     assert.equal(v.viewDir, 'LEFT');
   });
 });
+
+describe('enemies turn too (left / right only: no Back model)', () => {
+  /** An enemy view (no deploy direction, Front model only). */
+  async function enemyView(info = {}, assets = store()) {
+    const ctx = fakeViewCtx(fake.P, { assets, cam });
+    const v = new UnitView(ctx, { id: 7, side: 'enemy', kind: 'enemy', defId: 'enemy_test', spine: 'enemy_test', tier: 1, x: 4, y: 9, maxHp: 1000, ...info });
+    await tick(); await tick();
+    // an enemy starts mirrored; make it walk right so the left turn below is a real change of facing
+    if (!v.fixedFacing) { v.visFacing = 1; v._settleFlip(); }
+    return { v, assets };
+  }
+
+  test('a target to its left mirrors it; a target straight above keeps the horizontal', async () => {
+    const { v } = await enemyView();
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), true, 'left target');
+    assert.equal(v.viewDir, 'LEFT');
+    assert.equal(v.entryBack, false, 'an enemy has no Back model: nothing to swap');
+    run(v, FACING_TURN_S + 0.02);
+    assert.equal(v.modelFlip(), -1, 'drawn mirrored after the sweep');
+    // straight above: nothing to turn (no vertical model)
+    const { v: v2 } = await enemyView();
+    assert.equal(v2.faceTarget(at(4, 14), false, { lead: 0.4 }), false, 'above / below keeps the horizontal');
+  });
+
+  test('a FIXED_FACING leader never turns', async () => {
+    const { v } = await enemyView({ defId: 'enemy_9013_acstmk', spine: 'enemy_9013_acstmk' });
+    assert.equal(v.fixedFacing, 1);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), false, 'drawn one way only');
+  });
+
+  test('the velocity / attack-impulse facing does not fight the turn, and the clip end gives it back', async () => {
+    const { v } = await enemyView();
+    v.windUp(0.4, 'none');
+    v.faceTarget(at(1, 9), false, { lead: 0.4 });
+    v.onAttack(at(9, 9), 0, 'none', false);          // the enemy's own attack bookkeeping: must not flip it back
+    assert.equal(v.viewDir, 'LEFT');
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), false, 'already facing it');
+    v.actor.update(3);                               // the clip ends
+    run(v, 0.05);
+    assert.equal(v.viewDir, null, 'back to the velocity rule');
+  });
+});

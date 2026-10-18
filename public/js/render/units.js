@@ -1187,7 +1187,7 @@ export class UnitView {
         if (this.imp) this.imp.dirty = true;
       }
     }
-    if (this.isEnemy && !this.slide?.keepFacing && Math.abs(s.vx) > 0.08) this.visFacing = s.vx < 0 ? -1 : 1;
+    if (this.isEnemy && !this.viewDir && !this.slide?.keepFacing && Math.abs(s.vx) > 0.08) this.visFacing = s.vx < 0 ? -1 : 1;
     if ((prevFlags ^ this.flags) & UF.SKILL) this.setSkill(!!(this.flags & UF.SKILL));
     if (this.anim === ANIM.DIE && this.alive) this.die();
     if (this.actor && this.alive) this.actor.setBase(this._baseFromAnim());
@@ -1236,7 +1236,7 @@ export class UnitView {
     // v0 = 2D/T and a = v0/T run the distance in exactly T with the velocity reaching 0 there, integrated in update().
     // Push and pull fx carry keepFacing by default: the victim retains its pre-hit facing through the slide. Raw
     // displacements have no flag and still face their travel; snapshots take over when the slide ends.
-    if (this.isEnemy && !opts.keepFacing) this.visFacing = dx < 0 ? -1 : 1;
+    if (this.isEnemy && !this.viewDir && !opts.keepFacing) this.visFacing = dx < 0 ? -1 : 1;
     const v0 = 2 * D / T;
     const at = Number.isFinite(opts.at) ? opts.at : -Infinity;
     this.slide = {
@@ -1279,8 +1279,9 @@ export class UnitView {
 
   /** The model's horizontal draw sign: −1 when it is drawn mirrored (facing left; an enemy's own quirks applied). */
   modelFlip() {
-    // allies draw with the swept turnaround sign (_flip, render/facing.js FACING_TURN_S); enemies keep their velocity flip
-    const sign = this.isEnemy ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) : this._flip;
+    // the drawn horizontal sign: allies sweep it on every turn (_flip, render/facing.js FACING_TURN_S); an enemy under a
+    // target turn sweeps it too (no Back model, so its turn is left / right only), otherwise its velocity rule decides
+    const sign = this.isEnemy && !this.viewDir ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) : this._flip;
     return sign * (this.mirrorX ? -1 : 1);
   }
 
@@ -1353,7 +1354,9 @@ export class UnitView {
 
   /** Snap the turnaround to its end state (a deploy-direction change, or an immediate re-orientation). */
   _settleFlip() {
-    this._flip = this.isEnemy ? this.visFacing : ((this.viewDir || this.dir) === 'LEFT' ? -1 : 1);
+    this._flip = this.isEnemy
+      ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) * (this.mirrorX ? -1 : 1)
+      : ((this.viewDir || this.dir) === 'LEFT' ? -1 : 1);
     this._flipFrom = this._flip; this._flipTo = this._flip;
     this._flipT = 1; this._flipDur = 0; this._flipSwap = false;
   }
@@ -1378,9 +1381,9 @@ export class UnitView {
    * @param {'UP'|'DOWN'|'LEFT'|'RIGHT'} dir
    * @param {number} lead game seconds between the animation start and the strike
    */
-  _startTurn(dir, lead = 0, instant = false, forceSwap = false) {
+  _startTurn(dir, lead = 0, instant = false, forceSwap = false, from = null) {
     const swap = this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
-    this._flipFrom = this._flip;
+    this._flipFrom = Number.isFinite(from) ? from : this._flip;
     this._flipTo = dir === 'LEFT' ? -1 : 1;
     this._flipDur = FACING_TURN_S;
     this._flipT = 0;
@@ -1402,20 +1405,37 @@ export class UnitView {
    * @returns {boolean} whether the model turned
    */
   faceTarget(target, multi = false, opts = {}) {
-    if (this.isEnemy || this.destroyed || multi) return false;
+    if (this.destroyed || multi || this.fixedFacing) return false;
     if (this._heldFacing()) return false;
-    const d = facingToward(this, target);
-    if (!d || d === (this.viewDir || this.dir)) return false;
+    // an enemy has no deploy direction and no Back model: it only turns left / right, toward the target it is hitting
+    const d = this.isEnemy ? this._enemyTurnDir(target) : facingToward(this, target);
+    if (!d || d === (this.viewDir || (this.isEnemy ? (this.visFacing < 0 ? 'LEFT' : 'RIGHT') : this.dir))) return false;
+    const from = this.modelFlip() * (this.mirrorX ? -1 : 1);
     this.viewDir = d;
-    this._startTurn(d, Number(opts.lead) || 0, opts.instant === true);
+    this._startTurn(d, Number(opts.lead) || 0, opts.instant === true, false, from);
     return true;
   }
 
   /** 回正: go back to the deployed direction (the attack animation is over and no attack follows). */
   clearFacing() {
-    if (!this.viewDir || this.isEnemy) return;
+    if (!this.viewDir) return;
+    if (this.isEnemy) { this.viewDir = null; this._settleFlip(); return; }   // back to the velocity rule
     this.viewDir = null;
     this._startTurn(this.dir, 0, false, true);      // 回正: always the deployed model, no strike to protect
+  }
+
+  /**
+   * The direction an ENEMY's model turns to (render/facing.js): left / right only — an enemy has no Back model, so there is
+   * nothing to swap and a target straight above / below keeps the horizontal it already has. A FIXED_FACING leader is
+   * refused by the caller.
+   * @param {{ x: number }} target
+   * @returns {'LEFT'|'RIGHT'|null}
+   */
+  _enemyTurnDir(target) {
+    if (!target) return null;
+    const dx = Number(target.x) - Number(this.x);
+    if (!Number.isFinite(dx) || Math.abs(dx) < 0.1) return null;      // straight above / below: keep the horizontal
+    return dx < 0 ? 'LEFT' : 'RIGHT';
   }
 
   /** True while the model's attack clip is still playing (the facing is kept until it ends). */
@@ -1465,7 +1485,7 @@ export class UnitView {
     }
     if (target && this.isEnemy) {
       const dx = target.x - this.x;
-      if (Math.abs(dx) > 0.1) this.visFacing = dx < 0 ? -1 : 1;
+      if (Math.abs(dx) > 0.1 && !this.viewDir) this.visFacing = dx < 0 ? -1 : 1;
     } else if (target) {
       // the MODEL follows the target it hits (render/facing.js; `dir` and the range stay deployed). A wound-up attack was
       // already turned by the look-ahead (render/app.js windUpAttacks), so this is a no-op then — it restarts the hold.
@@ -1661,7 +1681,7 @@ export class UnitView {
         // 9 % of a 0.18 s slide at 60 fps, then a jump onto the end)
         sl.done = Math.min(sl.D, sl.done + (v0 + sl.v) / 2 * step);
         sl.t += step;
-        if (this.isEnemy && !sl.keepFacing) this.visFacing = sl.ux < 0 ? -1 : 1;
+        if (this.isEnemy && !this.viewDir && !sl.keepFacing) this.visFacing = sl.ux < 0 ? -1 : 1;
         const k = 1 - sl.done / sl.D;                  // the share of the way still to go
         this.x = sl.lx + sl.ox * k; this.y = sl.ly + sl.oy * k;
         // the clock or the spent velocity lands it on the sampled position
