@@ -99,6 +99,10 @@ export class MatchViews {
       spRound: this.gd.spRounds().includes(this.round),
       // DESIGN §14: 'client' = battles are simulated by the browsers (b.start specs), 'server' = legacy streaming
       combatMode: this.clientCombat ? 'client' : 'server',
+      // 战斗期倍速 (room.setBattleSpeed): game seconds per real second the normal rounds and 联防 run at (2 / 4). The HUD
+      // shows it during a battle and scales the countdown gauge; the boss rounds always run at the base 2× (their b.start
+      // carries it, this names the room's choice). Only the pace — never a battle's result.
+      speed: this.battleSpeed,
       // solo pause (g.pause, DESIGN §14): the battle, its field clock and every deadline are frozen while true
       paused: !!this.paused,
       players: this.order.map((ps) => ({

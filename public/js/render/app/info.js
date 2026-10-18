@@ -32,6 +32,9 @@ export function renderInfo(u) {
     // deploy direction of allies (UnitInfo.dir, DESIGN §3): the model (Back for UP, mirrored for LEFT) and the
     // ground wedge follow it; absent = unknown (legacy frames) → derived from `facing`, no wedge
     dir: typeof u.dir === 'string' ? u.dir : undefined,
+    // the model's DISPLAY-ONLY facing (UnitInfo.viewDir, Battle.setViewDir — a cosmetic facing plugin) while `dir` stays
+    // the real one: the view draws turned (UnitView.viewDir), the detail card / range preview keep `dir`
+    viewDir: typeof u.viewDir === 'string' ? u.viewDir : undefined,
     // the unit's current model form (UnitInfo.form: an enemy's mode, a 傀儡师's 替身): the view starts in it (UnitView reads info.form)
     form: typeof u.form === 'string' ? u.form : undefined,
     // DESIGN §16 loadout of an ally (UnitInfo.skillIndex / moduleId): the Spine actor plays that skill's clip, and a

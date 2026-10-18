@@ -5,6 +5,7 @@
 
 import { FORCED_EXIT, MAX_BATTLE_TIME } from '../constants.js';
 import { noteAttackCommit, updateAlly, updateEnemy } from '../ai.js';
+import { noteAttackRates } from '../snapshot.js';
 
 export class BattleLifecycle {
   start() {
@@ -107,6 +108,9 @@ export class BattleLifecycle {
           } catch (err) { this._internalError('updateAlly', err); }
         }
       });
+      // 攻击间隔变了就说一声 (the attack clip is stretched over it): after the allies' own update, so a skill or buff that
+      // landed this tick is already in s.interval (snapshot.js noteAttackRates).
+      this._phase('rates', () => noteAttackRates(this));
       this._phase('projectiles', () => this.projectiles.update(dt));
       this._phase('redeploy', () => this._checkRedeploys());
       this._phase('boss', () => this._bossSync());

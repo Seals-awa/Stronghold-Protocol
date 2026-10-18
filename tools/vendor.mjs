@@ -51,11 +51,29 @@ export function vendor({ log = console.log, warn = console.warn } = {}) {
     const from = join(root, src);
     if (optional && !existsSync(from)) { warn(`vendor: ${dst} skipped (${src} not installed; the 3D board falls back to 2D)`); continue; }
     if (VENDOR_REWRITES[dst]) writeFileSync(join(out, dst), rewriteBare(readFileSync(from, 'utf8'), VENDOR_REWRITES[dst]));
+    else if (dst === 'ses.umd.js') writeFileSync(join(out, dst), patchSes(readFileSync(from, 'utf8')));
     else copyFileSync(from, join(out, dst));
     done.push(dst);
     log('vendor:', dst);
   }
   return done;
+}
+
+/**
+ * [sp-patch] ses 2.3.0's `cauterizeProperty` deletes every remaining own property of a reachable object and throws when one
+ * is non-configurable — the engine's lockdown() then aborts and with it every script plugin (PLUGIN_WORKER_FAILED,
+ * `Cannot delete property 'arguments' of function TextEncoder()`). Some engines / Android WebView builds put an own,
+ * non-configurable `arguments` / `caller` on a function; both are plain function-introspection props with no sandbox power,
+ * so tolerate them exactly like an undeletable `prototype`. Applied here so a plain `npm install` keeps the patch.
+ * @param {string} src the vendored ses.umd.js source
+ * @returns {string} the patched source (unchanged when the anchor is missing, e.g. a future ses)
+ */
+export function patchSes(src) {
+  const anchor = 'error(`failed to delete ${subPath}`, reason);';
+  if (!src.includes(anchor) || src.includes('[sp-patch]')) return src;
+  const patch = "if (typeof obj === 'function' && (prop === 'arguments' || prop === 'caller')) { warn(`Tolerating undeletable ${subPath}`); return; }";
+  const marker = '[sp-patch] tolerate an own, non-configurable `arguments` / `caller` on a function (TextEncoder on some Android WebViews)';
+  return src.replace(anchor, `/* ${marker} */ ${patch} ${anchor}`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) vendor();

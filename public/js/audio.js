@@ -29,7 +29,9 @@
 //   operators, then fires dozens of skills, so they run on their own channel (own gain, settings 干员语音) through
 //   VoiceGate: one line at a time, a global gap, a per-unit per-slot cooldown, and a higher-priority line taking the
 //   channel over — the official scheduling of `audio_data.json battleVoice.voiceTypeOptions` (a tap's 选中 line skips
-//   the gap: VOICE_TAP_SLOTS). Dubs: 中文 `audio.voice` (default), 日本語 `audio.voiceJp`, English `audio.voiceEn`,
+//   the gap: VOICE_TAP_SLOTS). 部署 place is the one line that is never dropped for timing (VOICE_ALWAYS_SLOTS, owner
+//   request 「部署声音必定播放，优先级高于选中语音，会打断选中语音」): it always plays, takes the channel from the 选中 line,
+//   and queues behind a more important one. Dubs: 中文 `audio.voice` (default), 日本語 `audio.voiceJp`, English `audio.voiceEn`,
 //   한국어 `audio.voiceKr` and the operator's own-language dub `audio.voiceNative` (settings 语音语言, the 本土语言
 //   switch and the per-operator override; not tied to the interface language). A line the chosen tree or the host
 //   lacks falls back to the Chinese file of the same name (voiceLine).
@@ -341,6 +343,18 @@ export const VOICE_COOLDOWN_MS = Object.freeze({
 export const VOICE_TAP_SLOTS = Object.freeze(['select']);
 
 /**
+ * 部署语音 (`place`) — **必定播放** (owner request): the line an operator says when it is deployed is never lost to
+ * scheduling. On an idle channel it answers at once (no global gap, no per-unit cooldown); it takes the channel from the
+ * 选中干员 line (`select`, priority 10) and from anything less important than itself; and when a line ABOVE it is on air
+ * (开战 100 / 接敌 90 / 作战中 70 / 结算 85) it WAITS and sounds as soon as that line ends, instead of being dropped like
+ * every other battle line — `VOICE_QUEUE_TTL_MS` is how long a waiting deploy line stays live.
+ * It still does not cut off another 部署语音 (equal priority): two deployments close together sound one after the other.
+ */
+export const VOICE_ALWAYS_SLOTS = Object.freeze(['place']);
+/** How long a queued 部署语音 stays live while a more important line is on air. */
+export const VOICE_QUEUE_TTL_MS = 8000;
+
+/**
  * The line an operator says for a slot, in the chosen dub (settings 语音语言, ui/gameLogic/settings.js VOICE_LANGS,
  * or 'native'): { url, fallback }, or null for an operator no dub voices (the 预备干员 / 原型干员 stand-ins,
  * 盟约·辅助干员, summons) or a slot it lacks. 'cn' draws from `audio.voice`. Any other lang draws from
@@ -485,8 +499,9 @@ export class SfxLimiter {
 /**
  * Voice gate: one line at a time, a global gap between two lines, a per-unit per-slot cooldown, and takeover by a
  * clearly more important line (the caller fades the playing one out first). A tap's 选中干员 skips the gap and the
- * cooldown on an idle channel, replaces a 选中 line on air and starts no gap itself (VOICE_TAP_SLOTS). Pure — the clock
- * is passed in.
+ * cooldown on an idle channel, replaces a 选中 line on air and starts no gap itself (VOICE_TAP_SLOTS). A 部署语音
+ * (VOICE_ALWAYS_SLOTS) is never dropped for timing: it answers at once, takes the channel from anything less important
+ * and QUEUES behind a more important line. Pure — the clock is passed in.
  */
 export class VoiceGate {
   /** @param {{ gapMs?: number, preemptMargin?: number, maxUnits?: number }} [o] */
@@ -511,18 +526,33 @@ export class VoiceGate {
   /**
    * May a `slot` line from `unitKey` start now?
    * @param {string} slot
-   * @param {string|number|null} unitKey the cooldown key (a battle unit id; null = no per-unit cooldown)
+   * @param {string|number|null} unitKey the cooldown key (a battle unit id / a prep piece; null = unknown)
    * @param {number} now ms
-   * @returns {'play'|'preempt'|'drop'}
+   * @param {{ interrupt?: boolean }} [o] `interrupt`: this line may cut off a 部署语音 of ANOTHER operator (the prep's
+   *   placements ask for it — a different operator landing says its line now). A battle's mass deploy at the round start
+   *   does not: eight lines cutting each other would be a chatter.
+   * @returns {'play'|'preempt'|'queue'|'drop'} 'queue' = a 部署语音 that must sound once the line on air ends
    */
-  request(slot, unitKey, now) {
+  request(slot, unitKey, now, o = {}) {
     const pri = VOICE_PRIORITY[slot] ?? 0;
     const tap = VOICE_TAP_SLOTS.includes(slot);
+    const always = VOICE_ALWAYS_SLOTS.includes(slot);
     if (this.playing) {
       if (tap && this.playing.slot === slot) return 'preempt';   // a newer tap replaces the 选中 line on air
+      if (always) {
+        // 部署语音: the channel is handed over from anything below it (the 选中 line in particular); with `interrupt` also
+        // from ANOTHER operator's deploy line — the same operator landing again never repeats itself. A more important
+        // line is waited for, never dropped.
+        if (pri > this.playing.pri) return 'preempt';
+        if (pri < this.playing.pri) return 'queue';
+        const same = this.playing.key != null && unitKey != null && String(this.playing.key) === String(unitKey);
+        if (same) return 'drop';
+        return o.interrupt === true ? 'preempt' : 'drop';
+      }
       if (pri < this.playing.pri + this.preemptMargin) return 'drop';
       return 'preempt';                       // a clearly more important line takes the channel
     }
+    if (always) return 'play';                // 部署语音 always answers on an idle channel: no gap, no cooldown
     if (tap) return 'play';                   // a tap on an idle channel always answers (FOCUS_CHAR cooldown 0, no gap)
     if (now - this.lastAt < this.gapMs) return 'drop';
     if (unitKey != null && now < (this.unitUntil.get(`${unitKey}:${slot}`) || 0)) return 'drop';
@@ -531,7 +561,7 @@ export class VoiceGate {
 
   /** Record a line that started (call right after request() answered play / preempt). */
   start(slot, unitKey, now) {
-    this.playing = { slot, pri: VOICE_PRIORITY[slot] ?? 0 };
+    this.playing = { slot, pri: VOICE_PRIORITY[slot] ?? 0, key: unitKey ?? null };   // the key tells the operator apart
     if (!VOICE_TAP_SLOTS.includes(slot)) this.lastAt = now;   // the gap is between battle lines: a tap starts none
     const cd = VOICE_COOLDOWN_MS[slot] ?? 0;
     if (unitKey != null && cd > 0) {
@@ -595,6 +625,7 @@ export class AudioManager {
     this.voiceGate = new VoiceGate();
     this.voiceNode = null;    // { src, gain, url, token } of the line on air
     this.voiceToken = 0;
+    this.queuedVoice = null;  // a 部署语音 waiting for a more important line to end ({ charId, slot, unitKey, volume, at })
     this.bondCueNode = null;
     this.bondCueToken = 0;
     this.bondCueScope = null;
@@ -1260,7 +1291,7 @@ export class AudioManager {
    * @param {string} charId e.g. 'char_263_skadi'
    * @param {'start'|'faceEnemy'|'select'|'place'|'skill1'|'skill2'|'skill3'|'skill4'|'squad'|'squadFirst'
    *   |'resultFour'|'resultThree'|'resultTwo'|'resultLose'|'gacha'} slot
-   * @param {{ unitKey?: string|number|null, volume?: number }} [o] `unitKey` = the cooldown key (a battle unit id)
+   * @param {{ unitKey?: string|number|null, volume?: number, interrupt?: boolean }} [o] `unitKey` = the cooldown key (a battle unit id / a prep piece); `interrupt` = a 部署语音 of another operator may be cut off (the prep's placements pass it)
    * @returns {boolean} whether such a line exists and started
    */
   voice(charId, slot, o = {}) {
@@ -1272,14 +1303,42 @@ export class AudioManager {
       const line = pick();
       if (!line) return false;
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      const verdict = this.voiceGate.request(slot, o.unitKey ?? null, now);
+      const verdict = this.voiceGate.request(slot, o.unitKey ?? null, now, { interrupt: o.interrupt === true });
       if (verdict === 'drop') return false;
+      if (verdict === 'queue') { this._queueVoice(charId, slot, o, now); return false; }
       if (verdict === 'preempt') this._stopVoice();
       this.voiceGate.start(slot, o.unitKey ?? null, now);
       const token = ++this.voiceToken;
       this._playVoice(line.url, token, o.volume, line.fallback, pick);
       return true;
     } catch (err) { this._warn('voice', err); return false; }
+  }
+
+  /**
+   * Hold a line the gate could not start yet: only a 部署语音 lands here (a more important line is on air), and the
+   * newest one replaces any older — one deploy line is heard, not a backlog. `_flushQueuedVoice` plays it on release.
+   */
+  _queueVoice(charId, slot, o = {}, now) {
+    this.queuedVoice = { charId, slot, unitKey: o.unitKey ?? null, volume: o.volume, at: Number.isFinite(now) ? now : 0 };
+  }
+
+  /** The channel just freed up: sound the waiting 部署语音, unless it went stale while a more important line ran. */
+  _flushQueuedVoice() {
+    const q = this.queuedVoice;
+    if (!q) return;
+    this.queuedVoice = null;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - q.at > VOICE_QUEUE_TTL_MS) return;   // the deployment is long past: saying it now would be out of place
+    this.voice(q.charId, q.slot, { unitKey: q.unitKey, volume: q.volume });
+  }
+
+  /**
+   * The line on air ended by itself (its own end, a safety timer, a load failure): free the channel and let a queued
+   * 部署语音 sound. A takeover does NOT come here — `_stopVoice` frees the channel for the line that replaces it.
+   */
+  _endVoiceLine() {
+    this.voiceGate.release();
+    this._flushQueuedVoice();
   }
 
   /**
@@ -1328,12 +1387,12 @@ export class AudioManager {
       const next = again && this.fellBack.has(url) ? again() : null;
       if (next && next.url !== url && this.ctx && this.voiceGain) this._playVoice(next.url, token, volume, next.fallback);
       else if (fallback && fallback !== url && this.ctx && this.voiceGain) this._playVoice(fallback, token, volume);
-      else this.voiceGate.release();
+      else this._endVoiceLine();
     };
     this._buffer(url).then((buf) => {
       if (token !== this.voiceToken) return;   // taken over / stopped while it decoded: not ours to release
       if (!buf) { failed(); return; }
-      if (!this.ctx || !this.voiceGain) { this.voiceGate.release(); return; }
+      if (!this.ctx || !this.voiceGain) { this._endVoiceLine(); return; }
       try {
         const src = this.ctx.createBufferSource();
         src.buffer = buf;
@@ -1349,7 +1408,7 @@ export class AudioManager {
           // A stale end is the takeover's leftovers — `_stopVoice` already faded it out and released the gate.
           if (token === this.voiceToken) {
             if (this.voiceNode === node) this.voiceNode = null;
-            this.voiceGate.release();
+            this._endVoiceLine();
           }
           try { gain.disconnect(); } catch { /* ignore */ }
         };
@@ -1359,7 +1418,7 @@ export class AudioManager {
         this.voiceNode = node;
       } catch (err) {
         this._warn('voice-play', err);
-        if (token === this.voiceToken) this.voiceGate.release();
+        if (token === this.voiceToken) this._endVoiceLine();
       }
     }, failed);
   }
@@ -1394,6 +1453,7 @@ export class AudioManager {
     this.consumed.clear();
     // a new field is a new battle: the first operator deployed says 行动出发 again and no cooldown carries over
     this.startVoiceDone = false;
+    this.queuedVoice = null;
     try { this.voiceGate.reset(); this._stopVoice(); } catch { /* ignore */ }
     for (const u of Array.isArray(units) ? units : []) this._track(u);
   }

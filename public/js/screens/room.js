@@ -1,6 +1,10 @@
 // Room screen (同盟等待室): 4 seat cards (avatar frame, name, ready state, AI badge, host crown),
-// host controls (difficulty picker, add/remove AI and the 「AI 队友最后选择」 switch in co-op, start), invite code with
-// copy code / copy link, ready toggle and leave.
+// host controls (difficulty picker, add/remove AI, the 「AI 队友最后选择」 switch in co-op and the 战斗期倍速 picker
+// ×2 / ×4, start), invite code with copy code / copy link, ready toggle and leave.
+//
+// 战斗期倍速 (room.setBattleSpeed, room.state.battleSpeed): the room's normal rounds and 联防 run at ×2 (default) or ×4
+// game seconds per real second — only the pace, a battle steps the same fixed 1/30 s ticks so its result does not change;
+// 最终攻势 / 隐秘核心 always run at ×2. The host picks it, the others see it read-only; the room keeps it across matches.
 //
 // Start rule (server/lobby.js): room.start needs every *other* human connected and ready; the
 // host's start counts as the host's ready. So 开始模拟 is enabled exactly then and sends room.start
@@ -17,7 +21,7 @@
 // Texts go through t() (docs/I18N.md).
 
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
-import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS, MAX_SEATS, MAX_SPECTATORS } from '../../../shared/constants.js';
+import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS, MAX_SEATS, MAX_SPECTATORS, BATTLE_SPEEDS, DEFAULT_BATTLE_SPEED, isBattleSpeed } from '../../../shared/constants.js';
 import {
   html, Button, Icon, MicroLabel, PingPill, AvatarFrame, DifficultyTag, DifficultyIcon, Tooltip, confirmDialog, doctorNo, Modal,
 } from '../ui/components.js';
@@ -96,6 +100,23 @@ export function roomFacts(room, myId) {
 export function aiLastOption(room, myId) {
   if (!room || room.mode === 'solo') return null;
   return { on: room.aiPicksLast === true, editable: room.hostId != null && room.hostId === myId };
+}
+
+/**
+ * 战斗期倍速 (room.setBattleSpeed, room.state.battleSpeed): game seconds per real second the room's normal rounds and
+ * 联防 run at — 2 (the classic 2×, the default) or 4. The host picks it; everybody else sees it read-only. Only the pace:
+ * a battle steps the same fixed 1/30 s ticks at either speed, so its result does not change; 最终攻势 / 隐秘核心 always
+ * run at 2×. A room whose server predates the option sends no battleSpeed: the default is shown.
+ * @param {any} room room.state payload
+ * @param {any} myId
+ * @returns {{ speed: number, editable: boolean } | null}
+ */
+export function battleSpeedOption(room, myId) {
+  if (!room) return null;
+  return {
+    speed: isBattleSpeed(room.battleSpeed) ? room.battleSpeed : DEFAULT_BATTLE_SPEED,
+    editable: room.hostId != null && room.hostId === myId,
+  };
 }
 
 /** Invite link for a room code (current page URL with ?room=CODE). */
@@ -238,6 +259,24 @@ function AiLastToggle({ option, busy, onToggle }) {
   </div>`;
 }
 
+/** 战斗期倍速 picker (room.setBattleSpeed): the host switches ×2 / ×4, everybody else sees the room's speed. */
+function BattleSpeedPicker({ option, busy, onPick }) {
+  if (!option) return null;
+  const tip = t('作战与联防的推进速度。只加快节奏：战斗仍按固定的 1/30 秒推进，结果不变。最终攻势与隐秘核心始终为 ×2。');
+  return html`<div class="room-bar__opts bspeed" role="group" aria-label=${t('战斗速度')} data-testid="battle-speed">
+    <${Tooltip} text=${tip}>
+      <span class="room-bar__label">${t('战斗速度')}<${MicroLabel}>BATTLE SPEED<//></span>
+    <//>
+    <div class="dpick" role="radiogroup" aria-label=${t('战斗速度')}>
+      ${BATTLE_SPEEDS.map((s) => html`<button key=${s} type="button" role="radio" aria-checked=${option.speed === s ? 'true' : 'false'}
+          class=${`dpick__opt${option.speed === s ? ' is-active' : ''}`} style="--d-color:var(--mint-400)"
+          data-testid=${`battle-speed-${s}`} disabled=${!option.editable || !!busy}
+          onClick=${() => option.editable && option.speed !== s && onPick(s)}>×${s}</button>`)}
+    </div>
+    ${option.editable ? null : html`<span class="t-dim">${t('由创建者设置')}</span>`}
+  </div>`;
+}
+
 /** Room screen component. */
 export function RoomScreen() {
   const room = useStore((s) => s.room);
@@ -279,6 +318,7 @@ export function RoomScreen() {
   };
   const setDifficulty = (difficulty) => run('diff', () => net.request('room.setDifficulty', { difficulty }));
   const setAiLast = (on) => run('ailast', () => net.request('room.setAiPicksLast', { on }));
+  const setBattleSpeed = (speed) => run('bspeed', () => net.request('room.setBattleSpeed', { speed }));
   // spectator seats: the host frees one; a spectator takes a free player seat with room.join of this room
   const removeSpectator = (playerId) => run(`rs${playerId}`, () => net.request('room.removeSpectator', { playerId }));
   const sit = () => run('sit', () => net.request('room.join', { code: room.code, ...(room.test ? { testAck: true } : {}) }));
@@ -367,6 +407,7 @@ export function RoomScreen() {
           <${DifficultyPicker} room=${room} isHost=${facts.isHost} busy=${busy} onPick=${setDifficulty} />
           <${AiLastToggle} option=${aiLastOption(room, me.playerId)} busy=${busy} onToggle=${setAiLast} />
         </div>
+        <${BattleSpeedPicker} option=${battleSpeedOption(room, me.playerId)} busy=${busy} onPick=${setBattleSpeed} />
       </div>
       <div class="room-bar__center">
         <div class="ready-count" hidden=${!coop}>

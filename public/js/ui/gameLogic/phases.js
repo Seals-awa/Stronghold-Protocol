@@ -256,7 +256,15 @@ export function phaseTotalSeconds(pub, config, myId = null) {
     }
     case PHASE.PREP: return num(mode?.rounds?.[String(pub.round)]?.prepTime);
     case PHASE.COMBAT:
-    case PHASE.UNITE: return num(mode?.rounds?.[String(pub.round)]?.combatTimeLimit);
+    case PHASE.UNITE: {
+      // the round's length as the data names it (real seconds at the base 2×) — but m.public.deadline counts real seconds
+      // at the room's 战斗期倍速 (Match.battleSpeed, shown as m.public.speed): half of it at ×4. Scale the gauge's total
+      // the same way, or the bars would start half-lit in a 4× room.
+      const base = num(mode?.rounds?.[String(pub.round)]?.combatTimeLimit);
+      if (!base) return null;
+      const speed = Number(pub.speed) > 0 ? Number(pub.speed) : 2;
+      return Math.max(1, Math.round(base * (2 / speed)));
+    }
     // 最终攻势 / 隐秘核心: m.public.deadline is the level's 120 s countdown (maxPlayTime; the battle goes on past it)
     case PHASE.FINAL_ASSAULT:
     case PHASE.HIDDEN_CORE: return bossLevelSeconds(pub, config);

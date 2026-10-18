@@ -59,15 +59,25 @@ export const MAX_WIND_SPEEDUP = 2.5;
 const SKILL_CLIP_MIN = 0.2;
 
 /**
+ * Look-ahead below which there is no wind-up at all (the first attack of a battle, a batch that arrived late): the clip
+ * then plays at its OWN speed instead of being stretched over the whole attack interval (see windUpPlan).
+ */
+const MIN_LEAD = 0.05;
+
+/**
  * Attack clip timing (pure). `loopDur` / `hit` are clip seconds (strike frame at `hit`), `interval` and `lead` game
  * seconds. The clip plays at `ts = loopDur / interval` (one loop per attack); started `lead` before the attack it
  * reaches the strike frame on time: from `start = hit − lead·ts` at `ts` when little of the wind-up is lost,
  * otherwise from (nearly) the beginning at up to MAX_WIND_SPEEDUP × ts (`tsWind`).
+ * A look-ahead shorter than MIN_LEAD is no wind-up: the clip plays at its own speed (`ts = 1`). Stretching it over the
+ * interval only made the tail crawl — 惊蛰 is a 2.3 s caster with a 1 s attack clip, so the first swing of a battle (no
+ * look-ahead yet) ran at 0.43× and read as slow motion, while the later, properly wound-up swings looked right.
  * @returns {{ ts: number, tsWind: number, start: number }}
  */
 export function windUpPlan(loopDur, hit, interval, lead) {
-  const ts = clampN(loopDur / Math.max(0.08, interval), 0.35, 4);
   const L = Math.max(0, lead);
+  const paced = L >= MIN_LEAD;                       // enough look-ahead to pace the clip against the interval
+  const ts = clampN(loopDur / Math.max(0.08, paced ? interval : loopDur), 0.35, 4);
   let start = Math.max(0, hit - L * ts), tsWind = ts;
   if (start > hit * 0.15 && L > 0) {
     tsWind = Math.min(ts * MAX_WIND_SPEEDUP, hit / L);
@@ -667,7 +677,8 @@ export class SpineActor {
     if (!(hit > 0) || lead * plan.ts > hit + 1e-6) return false;
     if (!once) this.interval = iv;
     this.mode = 'attack';
-    this.attackUntil = this.clock + lead + Math.max(0, loopDur - hit) / plan.ts;
+    // the tail runs at the speed the clip was actually started with (`tsWind`: a sped-up wind-up), not the paced one
+    this.attackUntil = this.clock + lead + Math.max(0, loopDur - hit) / plan.tsWind;
     this._play(clip.loop, false, { timeScale: plan.tsWind, start: plan.start, mix: 0.06 });
     this.windTs = plan.ts;
     this.windUntil = this.clock + lead;
@@ -702,13 +713,16 @@ export class SpineActor {
     this.windUntil = null;
     this.wound = false;
     if (!wasAttacking) {
-      // not wound up (no look-ahead, e.g. a batch that arrived late): the sim already resolved the hit, so show the
-      // strike frame now — unless a clip-per-attack actor's rhythm leaves room for the whole clip (interval ≥ clip):
-      // then the clip plays complete from its wind-up at its own speed, the strike a little late (重犯's iron ball
-      // lifts before the slam; #246 by @TsangAsuna, accepted by the owner on 2026-10-07)
+      // not wound up (no look-ahead, e.g. a batch that arrived late, the first attack of a battle): the sim already
+      // resolved the hit, so show the strike frame now — unless a clip-per-attack actor's rhythm leaves room for the whole
+      // clip (interval ≥ clip): then the clip plays complete from its wind-up at its own speed, the strike a little late
+      // (重犯's iron ball lifts before the slam; #246 by @TsangAsuna, accepted by the owner on 2026-10-07).
+      // The tail plays at the clip's OWN speed: without a wind-up there is nothing to pace against, and stretching it over
+      // the whole interval made a slow caster's swing crawl (惊蛰: 1 s clip / 2.3 s interval = 0.43× on the first swing).
       const whole = per && this.interval >= loopDur;
-      if (whole) this.attackUntil = this.clock + loopDur / ts;
-      this._play(clip.loop, false, { timeScale: ts, start: whole ? 0 : hit, mix: 0.06 });
+      const speed = whole ? ts : 1;
+      this.attackUntil = this.clock + (whole ? loopDur : Math.max(0, loopDur - hit)) / speed;
+      this._play(clip.loop, false, { timeScale: speed, start: whole ? 0 : hit, mix: 0.06 });
     } else {
       const e = this.spine.state.tracks[0];
       if (e) {

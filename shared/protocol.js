@@ -1,7 +1,7 @@
 // Normative message catalogue (DESIGN §8). Used by server (validation) and client (building requests).
 // Every client→server message is `{ t, rid?, ...fields }`. Unknown `t` or invalid fields ⇒ ERR.BAD_MSG.
 
-import { DIFFICULTIES, NAME_MAX_LEN, ROOM_CODE_LEN, MAX_SEATS, EMOTES, GEO } from './constants.js';
+import { DIFFICULTIES, NAME_MAX_LEN, ROOM_CODE_LEN, MAX_SEATS, EMOTES, GEO, isBattleSpeed } from './constants.js';
 import { isDroppableChess } from './standIn.js';
 import { diySlotIds, validateDiyPicks } from './diy.js';
 import { cultivatedStats, isPotential, isCultivate, POTENTIAL_DEFAULT, CULTIVATE_DEFAULT, hasPotentialData } from './potential.js';
@@ -506,6 +506,11 @@ export const C2S = {
   // the co-op room option 「AI 队友最后选择」 (GitHub #338; host, before the match): the strategy and 机变 drafts order every
   // human seat before every AI seat (server/match/match/phases.js humansFirst); room.state.aiPicksLast
   'room.setAiPicksLast': { on: isBool },
+  // 战斗期倍速 (0.3.x): the room's normal rounds and 联防 run at this many game seconds per real second — 2 (the forced
+  // 2×) or 4; room.state.battleSpeed. Host-only, before the match, like a difficulty change it un-readies the others.
+  // Only the pace changes: every battle still steps the same fixed 1/30 s ticks, so its result is unchanged.
+  // 最终攻势 / 隐秘核心 always run at the base 2× (their shared leader HP pool is credited on the server's clock).
+  'room.setBattleSpeed': { speed: isBattleSpeed },
   'room.addBot': {},
   'room.removeBot': { seat: (v) => isInt(v, 0, MAX_SEATS - 1) },
   // the host removes another human before the match (server/lobby.js kick; community report #17); playerId = the one the
@@ -670,10 +675,18 @@ export function validateC2S(msg) {
 
 // Event tuple kinds inside `b.ev` (DESIGN §8.2). 'cast' ['cast', id, slot, dur?] is display only: an enemy uses the skill
 // of that slot of its data record's skills[] (server/sim/content/enemies/helpers.js castSlot; the client's skill clip
-// and official skill effects — render/app.js).
+// and official skill effects — render/app.js). 'vdir' ['vdir', id, dir|null, seconds?] turns a live ally MODEL only
+// (Battle.setViewDir — a cosmetic facing plugin): the sprite swaps Front ⇄ Back for UP / DOWN and mirrors for LEFT with a
+// `seconds` flip transition, while the unit's real `dir`, its attack range and every directional effect stay as deployed.
+// State, not decoration: a missed tuple leaves the model facing the old way, so the catch-up and late-entry replays keep
+// it (battle/runner.js, screens/game/early.js STATE_EV) and UnitInfo.viewDir carries it into a field entered late.
 export const EV = Object.freeze({
   SPAWN: 'spawn', ATK: 'atk', DMG: 'dmg', HEAL: 'heal', SKILL: 'skill', ENGAGE: 'engage', DIE: 'die', LEAK: 'leak',
-  STATUS: 'status', FX: 'fx', LAYER: 'layer', BOUNTY: 'bounty', DEPLOY: 'deploy', CAST: 'cast',
+  STATUS: 'status', FX: 'fx', LAYER: 'layer', BOUNTY: 'bounty', DEPLOY: 'deploy', CAST: 'cast', VDIR: 'vdir',
+  // ['rate', unitId, seconds] — the unit's attack interval CHANGED (a skill, an attack-speed buff/debuff; sim
+  // snapshot.js noteAttackRates). The renderer stretches the attack clip over it (render/attackRate.js): state, not
+  // decoration, so a missed tuple would leave the clip paced at the old rhythm. Only the changes are sent.
+  RATE: 'rate',
 });
 
 /**

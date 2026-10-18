@@ -3,9 +3,11 @@
 // Server-run combat (legacy streaming mode, SP_COMBAT=server; and the Final Assault when no field has a connected human):
 // FieldRunner steps every live field in lockstep:
 //   * real-time pacing (RealScheduler, or VirtualScheduler with instantCombat=false): an interval every 1000/30 ms
-//     accumulates elapsed real time × the match's game speed (forced 2×; `opts.combatSpeed` in tests/tools) and
-//     steps floor(acc / TICK) ticks, never more than maxTicksPerInterval(speed) (8 at 2×) per interval — the
-//     remainder is dropped so a stalled server never spirals.
+//     accumulates elapsed real time × the runner's speed and steps floor(acc / TICK) ticks, never more than
+//     maxTicksPerInterval(speed) (8 at 2×, 16 at 4×) per interval — the remainder is dropped so a stalled server never
+//     spirals. The speed is the match's 战斗期倍速 (Match._speedOf: 4 in a 4× room's normal rounds / 联防) or the base
+//     gameSpeed (the forced 2×, opts.combatSpeed in tests/tools — every boss round); it only sets the pace: the same
+//     battle steps the same ticks and ends with the same result either way.
 //   * instant (VirtualScheduler default): every field is stepped to completion synchronously.
 //   * a solo pause (Match.paused, g.pause) skips the intervals: the field clock stands still (HeadlessPacer too).
 // Every SNAP_EVERY (3) ticks of a field its events are drained; watchers of that field get `b.ev` then `b.snap`, both
@@ -92,12 +94,16 @@ export class FieldRunner {
   /**
    * @param {import('./Match.js').Match} m
    * @param {Array<{ fieldId: string, kind: string, players: string[], battle: any, live?: boolean }>} fields
-   * @param {{ onTick?: (runner: FieldRunner) => void, onDone: (runner: FieldRunner) => void }} hooks
+   * @param {{ onTick?: (runner: FieldRunner) => void, onDone: (runner: FieldRunner) => void, emit?: boolean, speed?: number }} hooks
+   *   speed: game seconds per real second these fields run at (Match._speedOf: 4 in a 4× room's normal rounds / 联防;
+   *   default: the match's own gameSpeed — a boss round). Only the pacing; the stepped tick count is the same.
    */
-  constructor(m, fields, { onTick = null, onDone, emit = true }) {
+  constructor(m, fields, { onTick = null, onDone, emit = true, speed = null }) {
     this.m = m;
     this.fields = fields;
     this.emit = emit !== false;
+    this.speed = Number.isFinite(speed) && speed > 0 ? speed
+      : (Number.isFinite(m.gameSpeed) && m.gameSpeed > 0 ? m.gameSpeed : GAME_SPEED);
     for (const f of fields) f.live = !f.battle.finished;
     this.onTick = onTick;
     this.onDone = onDone;
@@ -145,7 +151,7 @@ export class FieldRunner {
     const dt = Math.max(0, now - this.last);
     this.last = now;
     if (this.m.paused) return; // solo pause (Match.setPause): the field clock stands still
-    const speed = Number.isFinite(this.m.gameSpeed) && this.m.gameSpeed > 0 ? this.m.gameSpeed : GAME_SPEED;
+    const speed = this.speed;
     this.acc += (dt / 1000) * speed;
     const cap = maxTicksPerInterval(speed);
     let n = Math.floor(this.acc / TICK + 1e-9);

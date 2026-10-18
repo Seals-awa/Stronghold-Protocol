@@ -1,6 +1,16 @@
 // Browser/Worker engine loader. Workers receive data and never fetch it (DESIGN §32.11).
 export const SIM_DATA_FILES = Object.freeze(['chess', 'enemies', 'tokens', 'stages', 'waves', 'bonds', 'items', 'garrisons', 'bands', 'effects', 'backups']);
 
+/**
+ * Does a room's content set need the module Worker? Only a **script plugin** does: the Worker exists so that plugin code
+ * runs in a SES sandbox off the page's thread. A data-only set (数值 / 干员 / 敌人 / 商店 …, no script) simulates in the page
+ * exactly like the original content — and then a battle no longer pays the Worker's per-battle boot (engine modules + SES
+ * lockdown + plugin install), which was the multi-second start a phone showed. A set whose scripts the server did not
+ * enable (`scripts: []`) is the same case.
+ * @param {{ scripts?: unknown } | null | undefined} content a content set (content.js contentFor)
+ */
+export const contentNeedsWorker = (content) => Array.isArray(content?.scripts) && content.scripts.length > 0;
+
 function deepFreeze(root) {
   const stack = [root];
   while (stack.length) {

@@ -4,6 +4,7 @@
 // Installed on Battle.prototype by server/sim/Battle.js (a method container: never instantiated; `this` is the battle).
 
 import { ROWS, COLS, ENEMY_COLLIDER_RADIUS } from '../constants.js';
+import { normDir } from '../dir.js';
 import { absoluteRangeKeys, canTargetEnemy, extendedGrid, enemyStealthed } from '../targeting.js';
 import { bodyKeys, bodyInKeys, bodyInRadius, bodyInRange } from '../body.js';
 import { roundHalfEven } from '../detmath.js';
@@ -355,6 +356,29 @@ export class BattleQueries {
   refreshRange(unit) {
     if (!unit || unit.side !== 'ally' || !unit.alive || !unit.deployed) return false;
     this._refreshRange(unit);
+    return true;
+  }
+
+  /**
+   * DISPLAY-ONLY re-orientation of an ally (a cosmetic facing plugin turning the model toward its target): `unit.viewDir`
+   * — UP / RIGHT / DOWN / LEFT, a legacy ±1 reads as LEFT / RIGHT, `null` clears the override and the model shows `unit.dir`
+   * again; junk keeps the current value. NOTHING in the simulation reads it: the deploy direction `unit.dir` and the
+   * attack range stay exactly where the player put them, which is the point — 群攻/医疗 and every attack-range skill keeps
+   * working as deployed, only the model turns. Announced with the client event ['vdir', id, dir, seconds]
+   * (shared/protocol.js EV.VDIR; `seconds` = the flip transition length, see render/units.js setViewDir).
+   * False when nothing changed (no event, so a stable facing costs nothing).
+   * @param {object} unit @param {string|number|null} dir @param {number} [seconds]
+   */
+  setViewDir(unit, dir, seconds = 0) {
+    if (!unit || unit.side !== 'ally') return false;
+    const next = dir == null ? null : normDir(dir, unit.viewDir ?? unit.dir);
+    if (next === (unit.viewDir ?? null)) return false;
+    unit.viewDir = next;
+    if (next === null) this._ev(['vdir', unit.id, null]);
+    else {
+      const s = Number(seconds);
+      this._ev(['vdir', unit.id, next, Number.isFinite(s) && s > 0 ? Math.min(1, s) : 0]);
+    }
     return true;
   }
 

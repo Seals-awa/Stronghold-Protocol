@@ -149,6 +149,11 @@
 //   opts.battleContent 'full' | 'generic' | 'none' (sim content mode, default 'full')
 //   opts.timerScale    multiplier on every real-time phase timer (default 1)
 //   opts.combatSpeed   game seconds per real second while battles run in real time (default 2, the forced 2×)
+//   opts.battleSpeed   战斗期倍速 (room.setBattleSpeed): game seconds per real second the NORMAL rounds and 联防 run at —
+//                      2 (default: the base speed) or 4, the room's choice. Only the pace changes: a battle steps the
+//                      same fixed 1/30 s ticks, so its result is identical (shared/constants.js battleSpeedOf).
+//                      最终攻势 / 隐秘核心 keep opts.combatSpeed (their shared leader HP pool is credited on the field
+//                      clock; a faster client would only have its damage held back).
 //   opts.botRehearsal  candidate layouts a bot simulates per prep before placing (default 3, 0 = heuristic only;
 //                      a whole battle per candidate: ~20–300 ms of CPU each, see server/match/bot.js createRehearsal)
 //   opts.botSliceMs    wall-clock ms of rehearsal per scheduler callback (default 8 with a real scheduler, unbounded
@@ -204,7 +209,7 @@
 //   common.js        what the modules share (FLOW_TICKER_PRIORITY, DELAYS, BAND_TURN_SECONDS — re-exported here, OK,
 //                    fail, BOSS_CLOCK_MS)
 
-import { PHASE, modeIdFor } from '../../shared/constants.js';
+import { PHASE, modeIdFor, battleSpeedOf, isBattleSpeed } from '../../shared/constants.js';
 import { isContentHash } from '../../shared/plugins/identity.js';
 import { Battle } from '../sim/Battle.js';
 import { DataSource } from '../sim/simdata.js';
@@ -321,6 +326,11 @@ export class Match {
     this.battleContent = opts.battleContent || 'full';
     this.timerScale = Number.isFinite(opts.timerScale) && opts.timerScale >= 0 ? opts.timerScale : 1;
     this.gameSpeed = Number.isFinite(opts.combatSpeed) && opts.combatSpeed > 0 ? Math.min(opts.combatSpeed, 200) : GAME_SPEED;
+    /**
+     * 战斗期倍速 (room.setBattleSpeed, shared/constants.js BATTLE_SPEEDS): the room's speed for its normal rounds and 联防,
+     * 2 or 4 (the base when it names none). Only the pacing: see _speedOf. 最终攻势 / 隐秘核心 always use gameSpeed.
+     */
+    this.battleSpeed = isBattleSpeed(opts.battleSpeed) ? opts.battleSpeed : this.gameSpeed;
     /** layouts a bot rehearses per prep with the real simulation (bot.js; 0 = heuristic placement only) */
     this.botRehearsal = Number.isInteger(opts.botRehearsal) && opts.botRehearsal >= 0 ? Math.min(opts.botRehearsal, 8) : BOT_REHEARSAL_DEFAULT;
     /** wall-clock budget of one rehearsal slice (scheduleBotPrep) */
@@ -510,6 +520,17 @@ export class Match {
     // above). The input journal records the steps that callback took; replay stops there.
     if (this.test && opts.journal !== false) installTestTrace(this, opts);
   }
+
+  /**
+   * Game seconds per real second a field of `kind` runs at (shared/constants.js battleSpeedOf): the room's 战斗期倍速 for
+   * its normal rounds and 联防, the base opts.combatSpeed for 最终攻势 / 隐秘核心 (whose shared leader HP pool is credited on
+   * the field clock, engine budgets included). Both the b.start the clients follow, the server-side pacing (FieldRunner)
+   * and every deadline of the field (result deadline, release, overtime) read this, so they always agree. It changes only
+   * the pace — a battle steps the same fixed 1/30 s ticks at either speed, so its result is identical.
+   * @param {string} kind battle kind ('normal' | 'unite' | 'boss' | 'hidden')
+   * @returns {number}
+   */
+  _speedOf(kind) { return battleSpeedOf(kind, this.gameSpeed, this.battleSpeed); }
 }
 
 // the method modules, in this order (a name defined twice is an error, never a silent override)

@@ -3,8 +3,9 @@
 // Like the official client, the browser simulates battles itself with the shared deterministic sim (server/sim,
 // served read-only at /sim/). The server sends a JSON BattleSpec (`b.start`); this module builds the Battle with
 // /sim/spec.js createBattleFromSpec and
-//   * steps it at the battle speed (fixed 1/30 s ticks, 2× → 60 ticks per real second; at most
-//     max(8, 4·speed) ticks per animation frame, bounded fast-forward up to CATCHUP_TICKS per frame when it is far
+//   * steps it at the battle speed (b.start `speed`: 2, or 4 in a room whose host chose 战斗期倍速 — the same fixed
+//     1/30 s ticks, so the battle's result is identical either way; at most max(8, 4·speed) ticks per animation frame,
+//     bounded fast-forward up to CATCHUP_TICKS per frame when it is far
 //     behind: a reconnect, observing a running field, a tab back from the background),
 //   * feeds the render engine every frame through the same wire formats the server used to stream
 //     (`snap` = b.snap frame from battle.snapshot(), `ev` = b.ev frame from battle.drainEvents()) and publishes the
@@ -21,8 +22,10 @@
 // 0.1.0: a 转译基底·α that changed form during a stall or in a background tab died in its first-form model). Such a
 // frame or step covers seconds of play, so it drains the events every EV_SLICE ticks and each batch keeps its own game
 // time (`gt`): the render engine then knows how late a form fx is and skips a change clip that has already ended.
-// Display replicas (a teammate's field after the own battle, 联防 observers, the partner of a boss pair) run the same
-// spec fast-forwarded to the server's clock (`elapsed`) and never report.
+// Display replicas (a teammate's field while the own battle runs — 设置 →「作战中查看队友」 — or after it, 联防 observers,
+// the partner of a boss pair) run the same spec fast-forwarded to the server's clock (`elapsed`) and never report. The
+// own authoritative battle keeps its clock beside the replica it does not show (frame(): `render` is true for `cur`
+// alone), so watching a teammate mid-battle costs one more simulation, never the own one.
 // A b.start is registered as pending the moment it arrives — before the sim module has loaded, while the Battle is built
 // and caught up silently — so what comes for that battle meanwhile is applied to it in order (PR #266): a b.end takeover
 // stops its reports; a forced / timeout b.end (the first end counts) ends it as soon as the Battle exists, without
@@ -85,8 +88,8 @@ import { contentFor as appContentFor, simContent as appSimContent, contentSet as
 import { fxForm } from '../../../shared/protocol.js';
 import { spectateEffects } from './observe.js';
 import { recordError, setBattleSource } from '../diag.js';
-import { loadBrowserSim } from './simLoader.js';
-import { InPageSimHost, WorkerSimHost } from './simHost.js';
+import { loadBrowserSim, contentNeedsWorker } from './simLoader.js';
+import { InPageSimHost, WorkerSimHost, takeWarmHost, parkHost, pruneWarmHosts, drainWarmHosts, prewarmHost, prewarming } from './simHost.js';
 import { trackCombat, combineCombat } from './metrics.js';
 import { t } from '../../../shared/i18n.js';
 export { loadBrowserSim, SIM_DATA_FILES } from './simLoader.js';
@@ -97,7 +100,9 @@ export const CATCHUP_TICKS = 240;
 /** Silent catch-up slice (ticks) while a new battle is prepared before it is shown. */
 const PREPARE_SLICE = 600;
 const MAX_ENTRIES = 4;
-const STATE_EV = new Set(['spawn', 'die', 'deploy', 'status', 'skill', 'leak']);
+/** A modded battle boots the next round's sim Worker this long after it started, off the critical path. */
+const PREWARM_DELAY_MS = 4000;
+const STATE_EV = new Set(['spawn', 'die', 'deploy', 'status', 'skill', 'leak', 'vdir', 'rate']);
 /**
  * The b.ev tuples a catch-up frame or the hidden-tab backlog keeps: the state-bearing kinds, and every fx that sets an
  * enemy's model form (shared/protocol.js fxForm — dropped, the view kept the old model: player report #5 after 0.1.0).
@@ -117,21 +122,22 @@ export const EV_SLICE = 15;
 
 /**
  * A hidden-tab backlog without the superseded toggles: of the 'status' tuples only the last per (unit, status), of the
- * 'skill' tuples only the last per unit, every other tuple (spawn / die / deploy / leak / form fx — bounded by the units)
- * kept; order preserved. A long hidden boss fight toggles statuses thousands of times, the rest stays small.
+ * 'skill' and 'dir' tuples only the last per unit, every other tuple (spawn / die / deploy / leak / form fx — bounded by
+ * the units) kept; order preserved. A long hidden boss fight toggles statuses thousands of times, the rest stays small.
  */
 export function compactHeld(list) {
   const last = new Map();
   list.forEach((x, i) => {
     if (x[0] === 'status') last.set(`s:${x[1]}:${x[2]}`, i);
     else if (x[0] === 'skill') last.set(`k:${x[1]}`, i);
+    else if (x[0] === 'vdir') last.set(`d:${x[1]}`, i);
   });
-  return list.filter((x, i) => (x[0] === 'status' ? last.get(`s:${x[1]}:${x[2]}`) === i : x[0] === 'skill' ? last.get(`k:${x[1]}`) === i : true));
+  return list.filter((x, i) => (x[0] === 'status' ? last.get(`s:${x[1]}:${x[2]}`) === i : x[0] === 'skill' ? last.get(`k:${x[1]}`) === i : x[0] === 'vdir' ? last.get(`d:${x[1]}`) === i : true));
 }
 /** Request failures after which a b.result counts as never delivered (re-sent on resume / b.start). */
 export const LOST_RESULT_CODES = Object.freeze(['DISCONNECTED', 'OFFLINE', 'TIMEOUT']);
 
-/** Ticks per frame at a speed (same cap as the server pacing: server/match/fields.js maxTicksPerInterval). */
+/** Ticks per frame at a speed (8 at 2×, 16 at 4×; same cap as the server pacing: server/match/fields.js maxTicksPerInterval). */
 export const ticksPerFrameCap = (speed) => Math.max(8, Math.ceil((Number(speed) || 2) * 4));
 
 /**
@@ -272,7 +278,13 @@ export function createBattleRunner(deps) {
     simCs = want;
     const p = (want ? contentFor(want).then((content) => {
       if (!content || content.cs !== want) throw new Error(`the content set ${want.slice(0, 8)} is not loaded on this page`);
-      return deps.loadSim ? loadSim(content) : { content, cs: want, remote: true };
+      // A room's content set runs in THIS page unless it carries a script plugin: the module Worker exists for the SES
+      // sandbox, and its per-battle boot (engine modules + SES lockdown + plugin install) is what made a modded battle
+      // take seconds to start on a phone. A data-only set — a 数值 / 干员 / 商店 plugin, or scripts the server did not
+      // enable — is simulated in the page exactly like the original content (simLoader.contentNeedsWorker).
+      if (deps.loadSim) return loadSim(content);
+      if (!contentNeedsWorker(content)) return loadSim({ ...content, scripts: [] });
+      return { content, cs: want, remote: true };
     }) : loadSim(null)).catch((err) => { if (simP === p) { simP = null; simCs = null; } throw err; });
     simP = p;
     return p;
@@ -697,7 +709,8 @@ export function createBattleRunner(deps) {
       if (entries.size <= MAX_ENTRIES) break;
       if (e === cur || (e.authoritative && !e.resultSent) || e.own || e.delivery === 'pending' || e.delivery === 'undelivered') continue;
       rememberCombat(e);
-      e.host?.stop();
+      // a worker that finished cleanly is parked for the next battle instead of being thrown away
+      if (!(e.host?.remote && parkHost(e.host))) e.host?.stop();
       entries.delete(id);
     }
   }
@@ -789,11 +802,16 @@ export function createBattleRunner(deps) {
       if (!csAccepted(e.spec.cs)) e.authoritative = false;
       let battle;
       try {
-        e.host = deps.createHost ? deps.createHost(sim, err => failWorker(e, err)) : sim.remote
+        // A modded (content-set) battle runs in a module Worker whose boot — engine modules, SES lockdown, plugin
+        // install — costs seconds on a phone. A worker parked by the previous battle of the same content set is taken
+        // as is; `start(spec)` builds this battle's Battle on top of it (simHost.js parkHost).
+        pruneWarmHosts();
+        const warm = sim.remote ? takeWarmHost(sim.cs, err => failWorker(e, err)) : null;
+        e.host = warm || (deps.createHost ? deps.createHost(sim, err => failWorker(e, err)) : sim.remote
           ? new WorkerSimHost({ onFailure: err => failWorker(e, err), timeoutMs: deps.workerTimeoutMs })
-          : new InPageSimHost();
+          : new InPageSimHost());
         if (e.host.remote) {
-          await e.host.load(sim.cs, sim.content);
+          if (!warm) await e.host.load(sim.cs, sim.content);
           if (!wanted()) return;
           await e.host.start(e.spec);
         } else { e.host.sim = sim; e.host.start(e.spec, { logger }); }
@@ -808,6 +826,12 @@ export function createBattleRunner(deps) {
       e.sim = sim;
       e.battle = battle;
       e.meter = e.host.meter;
+      // Boot the NEXT battle's worker in the background now, while this battle plays: entering the next round then skips
+      // the boot (engine modules, SES lockdown, plugin install) — the 1–3 s a phone spends per modded battle. Ignored
+      // when one is already parked/in flight; a stale one is dropped by pruneWarmHosts / the cs check below.
+      if (e.host.remote && sim.cs && !prewarming(sim.cs) && typeof setTimeout === 'function') {
+        setTimeout(() => { if (wanted() && csAccepted(sim.cs)) prewarmHost(sim.cs, sim.content); }, PREWARM_DELAY_MS);
+      }
       // The Worker page holds wire state only (time, ids): no `damaged` hook and no `heal`, so trackCombat cannot
       // run there. An in-page Battle gets the meter only when 作战统计 is on (default off; a test may pin it).
       if (metricsEnabled() && !e.host.remote) e.combatMetrics = trackCombat(battle);
@@ -901,6 +925,7 @@ export function createBattleRunner(deps) {
     // host.stop() drops the in-page Battle the meter reads.
     for (const e of pending.values()) rememberCombat(e);
     for (const e of [...entries.values(), ...pending.values()]) e.host?.stop();
+    drainWarmHosts();
     pending.clear();
     entries.clear();
     if (!keepMetrics) combatHistory.clear();

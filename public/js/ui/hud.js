@@ -109,6 +109,8 @@ export function PhaseCapsule({ pub, hud, miss = null }) {
         fallback=${html`<${Icon} name="sword" class="capsule__icon" />`} />
       <span class="capsule__kills num"><b>${hud?.resolved ?? hud?.killed ?? 0}</b>/${hud?.total ?? '--'}</span>
       ${phase === PHASE.UNITE ? html`<span class="capsule__tag">${t('联防')}</span>` : null}
+      ${Number(pub?.speed) > 2 ? html`<span class="capsule__tag" style="background:var(--mint-500);color:var(--text-on-mint)"
+        title=${t('本局战斗速度 ×{speed}（创建者在房间中设置；只加快节奏，战斗结果不变）', { speed: pub.speed })}>×${pub.speed}</span>` : null}
       ${phase === PHASE.UNITE && Number.isFinite(miss) ? html`<${MissTag} n=${miss} />` : null}
     </div>`;
   }

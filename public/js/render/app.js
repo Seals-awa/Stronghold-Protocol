@@ -35,7 +35,9 @@
 //                                               'die' with reason FORCED_EXIT (an operator entering 联防 knocked out,
 //                                               user playtest #5 item 2) goes straight to the held pose, no burst; an
 //                                               fx with a `form` (shared/protocol.js fxForm) switches the enemy's
-//                                               model to that clip set (render/units.js FORMS)
+//                                               model to that clip set (render/units.js FORMS); a 'vdir' tuple turns a
+//                                               live ally MODEL only (Battle.setViewDir — a cosmetic facing plugin),
+//                                               with the flip transition the tuple carries
 //   view.setLocalFeed({ on, speed })            frames come from the local sim every frame (client-side combat):
 //                                               ~2-frame buffer at the battle's game speed
 //   view.highlightTiles(tiles, style)           [[r,c]] | [{row,col}]; style 'legal'|'illegal'|'range'|'rangeStand'|
@@ -926,7 +928,7 @@ export async function createFieldView(host, options = {}) {
         // also while its drop is still held on that tile (the direction step pins it there, so `moved` is false); turned in
         // place, retreated or moved on the bench it does not
         const was = prevAt.get(e.uid);
-        if (was && e.area === 'board' && (was.area !== 'board' || was.row !== e.row || was.col !== e.col) && !(dragState && dragState.key === key)) landPiece(v, 'board');
+        if (was && e.area === 'board' && (was.area !== 'board' || was.row !== e.row || was.col !== e.col) && !(dragState && dragState.key === key)) landPiece(v, 'move');
       }
       v._home = w;
       v.dimmed = false;
@@ -958,9 +960,38 @@ export async function createFieldView(host, options = {}) {
   /** Land a prep piece (UnitView.land, PR #416) and note it (`landings`, dev / tests); false when the view refused. */
   function landPiece(v, why) {
     if (!v || typeof v.land !== 'function' || !v.land()) return false;
+    // 部署语音 (owner request): an operator that lands on the board in the PREP says its 部署 line — the same 'place' slot
+    // the battle's own deploy event uses, so the voice gate's rule applies here too (it always plays and takes the channel
+    // from the 选中 line). `board` = newly on the board (from the bench, the hand, a swap), `buy` = purchased onto it,
+    // `move` = dropped on another board tile / swapped there (the owner wants the line there too); a merge and the
+    // round-start replay (`round`) stay silent. The gate drops a second 'place' while one plays, so dragging quickly does
+    // not stack voices.
+    if (why === 'board' || why === 'buy' || why === 'move') sayPlace(v);
     landings.push({ uid: v.uid ?? null, why, at: performance.now() });
     if (landings.length > 40) landings.shift();
     return true;
+  }
+
+  /**
+   * The operator's 部署语音 for a prep placement. The voice bank belongs to the operator (`char_*`) while a piece is a chess
+   * id (`chess_char_*`), so the chess record's `charId` maps between them (`data.chess`); an id that already is a charId is
+   * used as is. Nothing here may fail a landing.
+   */
+  function sayPlace(v) {
+    try {
+      const info = v?.info || {};
+      if (info.kind !== 'op' || v.isEnemy) return;              // operators and summons speak; items / devices do not
+      const defId = typeof info.defId === 'string' ? info.defId : null;
+      if (!defId) return;
+      // a 补位 / 自选 piece draws another operator: its model id (`spine`) is that operator's charId, the one whose voice bank
+      // exists — otherwise the chess record's charId is the operator's own
+      const spine = typeof info.spine === 'string' && info.spine.startsWith('char_') ? info.spine : null;
+      const charId = defId.startsWith('char_') ? defId : (spine || data.chess(defId)?.charId || null);
+      if (!charId) return;
+      // `interrupt`: in the prep a DIFFERENT operator landing takes the channel over from the deploy line on air
+      // (audio.js VoiceGate.request); the same piece landing again stays silent (same unitKey).
+      ctx.audio?.voice?.(charId, 'place', { unitKey: 'prep:' + (v.id ?? v.uid ?? defId), interrupt: true });
+    } catch { /* a voice never stops the landing */ }
   }
 
   /**
@@ -1673,9 +1704,19 @@ export async function createFieldView(host, options = {}) {
   function windUpAttacks(renderT) {
     upcomingT = renderT;
     upSkill.clear();
+    // pass 1 — how many attacks each unit has in the window: a 群攻 hit (several at once) must not turn the model, and
+    // the facing has to be decided before the clip starts, so the count is needed before onUpcoming runs
+    UP_ATK_COUNT.clear();
+    interp.forEachUpcoming(renderT, renderT + 1.5, countUpcomingAttack);
+    // pass 2 — face the target, then start the clip (FACING FIRST, see onUpcoming)
     interp.forEachUpcoming(renderT, renderT + 1.5, onUpcoming);
   }
   let upcomingT = 0;
+  /** Attacks per unit inside the look-ahead window (render/app.js windUpAttacks pass 1). */
+  const UP_ATK_COUNT = new Map();
+  function countUpcomingAttack(e) {
+    if (e[0] === 'atk') UP_ATK_COUNT.set(e[1], (UP_ATK_COUNT.get(e[1]) || 0) + 1);
+  }
   // the look-ahead's skill state: a ['skill', id, on] queued before an 'atk' of that unit (an instant skill sends 1, its
   // attack and 0 in one tick) — the official cast effects of the wind-up are the skill's own then
   const upSkill = new Map();
@@ -1684,22 +1725,32 @@ export async function createFieldView(host, options = {}) {
     if (e[0] !== 'atk' || woundUp.has(e) || CHAIN_KINDS.has(e[3])) return;
     const v = views.get(e[1]);
     if (!v || !v.windUp) return;
+    const tgt = views.get(e[2]) || battleView(e[2]);
+    // FACING BEFORE THE ANIMATION (owner's rule): the model turns toward the target the moment its attack clip starts
+    // winding up — the strike frame comes later, so the swing is already facing the right way. The 0.05 s flip runs
+    // during the clip's anticipation. `onAttack` repeats it for an attack that had no look-ahead (the clip then starts
+    // at its strike frame); a 群攻 hit is left alone on both paths.
+    if (tgt) v.faceTarget?.(tgt, (UP_ATK_COUNT.get(e[1]) || 0) > 1);
     if (v.windUp(t - upcomingT, e[3])) {
       woundUp.add(e);
       // the official cast effects that start with the cast play with the clip (render/vfx/wiring.js castStart)
       const a = v.actor;
       const skillOn = upSkill.has(e[1]) ? upSkill.get(e[1]) : undefined;
-      wiring.castStart(v, views.get(e[2]), e[3], a ? { skip: a.windSkip || 0, left: a.windCastLeft || 0, skillOn } : { skillOn });
+      wiring.castStart(v, tgt, e[3], a ? { skip: a.windSkip || 0, left: a.windCastLeft || 0, skillOn } : { skillOn });
     }
   }
 
   const EVS = [];
   /** State events handed out more than 1.5 game s late (a stall, a hidden tab, a field entered late) → how late. */
   const LATE = new Map();
+  /** How many targets one attacker hit this frame: > 1 is a 群攻 hit, whose model is not turned (render/units.js). */
+  const ATK_COUNT = new Map();
   function processEvents(renderT) {
     EVS.length = 0;
     LATE.clear();
+    ATK_COUNT.clear();
     interp.takeEvents(renderT, EVS, renderT - 1.5, LATE);
+    for (const e of EVS) if (e[0] === 'atk') ATK_COUNT.set(e[1], (ATK_COUNT.get(e[1]) || 0) + 1);
     for (const e of EVS) {
       try { handleEvent(e, renderT); } catch (err) { if (!handleEvent.warned) { handleEvent.warned = true; console.warn('[render] event failed', e, err); } }
     }
@@ -1723,11 +1774,27 @@ export async function createFieldView(host, options = {}) {
         if (v) { v.onDeploy?.(); if (v.info?.kind !== 'device' && !wiring.deploy(v)) fx.deploy(v); }
         break;
       }
+      // an ally's MODEL turned toward its target (shared/protocol.js EV.VDIR, Battle.setViewDir — a cosmetic facing
+      // plugin): Front ⇄ Back for UP / DOWN, mirrored for LEFT, with the flip transition the tuple carries. The unit's
+      // real `dir` and its attack range are untouched (UnitView.setViewDir)
+      // the unit's attack interval CHANGED (shared/protocol.js EV.RATE 鈥?a skill or an attack-speed buff): the attack clip is
+      // stretched over it (render/attackRate.js), so a view that missed the tuple would keep the old rhythm; state, so the
+      // catch-up and late-entry replays keep it too
+      case 'rate': {
+        const v = views.get(e[1]) || battleView(e[1]);
+        if (v && typeof v.setAtkInterval === 'function') v.setAtkInterval(e[2]);
+        break;
+      }
+      case 'vdir': {
+        const v = views.get(e[1]) || battleView(e[1]);
+        if (v && typeof v.setViewDir === 'function') v.setViewDir(e[2], Number(e[3]) || 0);
+        break;
+      }
       case 'atk': {
         const src = views.get(e[1]) || battleView(e[1]);
         const tgt = views.get(e[2]) || battleView(e[2]);
         // chain / chainHeal bounces: the "source" is the previous target of the bounce, not an attacker
-        if (src && !CHAIN_KINDS.has(e[3])) src.onAttack?.(tgt, now, e[3]);
+        if (src && !CHAIN_KINDS.has(e[3])) src.onAttack?.(tgt, now, e[3], (ATK_COUNT.get(e[1]) || 0) > 1);
         if (e[3] === 'none' || !e[3]) { if (tgt && src) meleePending.set(tgt.id, { src, t: now }); }
         // the unit's official attack (casts, projectile, melee hits — render/vfx/wiring.js) or a chain's bounce (the line of
         // the official shot that opened the chain: wiring.chain), else the procedural one

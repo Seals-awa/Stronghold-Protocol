@@ -88,6 +88,8 @@ import { MANIFOLD, isManifold, manifoldCopyForm, manifoldAttackForm } from './ma
 import { diamondTexture, shadowTexture, fxAtlas, tierChip, statusTexture, itemTexture, hudRings, ringArc, downLabel, HUD_DISC, ELEMENT_RING } from './textures.js';
 import { COLORS, TIER_COLORS, ENEMY_FRAME, UNIT, PROJ, statusIconKey, statusIconSuppressed } from './style.js';
 import { drawCrate, rowDepthKey, ROW_KEY, deviceBoxOf, DEVICE_BOX } from './tiles.js';
+import { facingToward, FACING_FLIP_S, FACING_HOLD_S } from './facing.js';
+import { startAtkInterval, nextAtkInterval, clampAtkInterval } from './attackRate.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const DIRS = ['UP', 'RIGHT', 'DOWN', 'LEFT'];
@@ -682,6 +684,21 @@ export class UnitView {
     this.hasDir = !this.isEnemy && typeof info.dir === 'string' && DIRS.includes(info.dir.toUpperCase());
     this.facing = this.dir === 'LEFT' ? -1 : 1;
     this.visFacing = this.isEnemy ? -1 : this.facing;
+    // DISPLAY-ONLY facing (UnitInfo.viewDir, Battle.setViewDir — a cosmetic facing plugin): the direction the MODEL is
+    // drawn in while `dir` (the deploy direction that rotates the attack range) stays where the player put it. null = as
+    // `dir`. A change runs the flip transition below (setViewDir): the drawn horizontal sign `_flip` sweeps from
+    // `_flipFrom` to `_flipTo` over `_flipDur` seconds — through 0, edge-on, when the model itself has to change
+    // (Front ⇄ Back, swapped at that midpoint so the swap is hidden).
+    this.viewDir = !this.isEnemy && typeof info.viewDir === 'string' && DIRS.includes(info.viewDir.toUpperCase())
+      ? info.viewDir.toUpperCase() : null;
+    if (this.viewDir) this.visFacing = this.viewDir === 'LEFT' ? -1 : 1;
+    this._flip = this.isEnemy ? -1 : (this.viewDir || this.dir) === 'LEFT' ? -1 : 1;
+    this._flipFrom = this._flip; this._flipTo = this._flip;
+    this._flipT = 1;        // 1 = settled (no transition running)
+    this._flipDur = 0;
+    this._flipSquash = 1;   // 1 → 0 → 1 while the model swaps (no visible width at the swap)
+    this._flipSwap = false; // the Front ⇄ Back swap is still owed at the transition's midpoint
+    this.facingFor = 0;     // seconds left before an attack-turned model goes back to its deployed direction (faceTarget)
     this.hp = Number(info.maxHp) || 1; this.maxHp = Number(info.maxHp) || 1; this.ghostHp = this.hp;
     this.sp = 0; this.spMax = 0;
     this.ammo = null;             // [rounds left, rounds in the magazine] while an ammo skill runs (sync; b.snap `ammo`)
@@ -691,6 +708,8 @@ export class UnitView {
     this.energy = null;           // [stored energies, the trait's maximum] of a 秘术师, including zero (sync; b.snap `energy`)
     this.energyHud = null;
     this.neg = 0;                 // the share of its cap a negative-HP pool holds, 0 = none (sync; b.snap `neg`, 斩业星熊's 我执)
+    this.shield = 0;              // the HP shield it holds, in HP points, 0 = none (sync; b.snap `shield`): the white share
+                                  // of the HP bar, right after the green one — the bar itself is drawn over maxHp + shield
     this.layers = 0;              // hit-negating 护盾 layers (sync; b.snap `layers`: the official layer effect, vfx/talentfx.js)
     this.charges = null;          // [stored, maximum] of a charge skill (sync; b.snap `charges`: vfx/skillfx.js)
     this.flags = 0; this.anim = ANIM.IDLE;
@@ -711,7 +730,9 @@ export class UnitView {
     this.flash = 0;
     this.bob = Math.random() * Math.PI * 2;
     this.hovered = false; this.dimmed = false; this.lift = 0;
-    this.lastAtk = -1; this.atkInterval = defaultInterval(ctx, info);
+    // the attack clip is stretched to this: the snapshot's own interval first (UnitInfo.atkInterval, buffs included),
+    // the base-record guess only as a fallback — a bare guess made an operator swing in slow motion at the battle start
+    this.lastAtk = -1; this.atkSeen = false; this.atkInterval = startAtkInterval(info.atkInterval, defaultInterval(ctx, info));
     this.shake = 0;
     this.screen = { x: 0, y: 0, s: 1, top: 0 };
     this.placed = false;          // set by the first update's projection: until then `screen` is not on screen (bounds)
@@ -1057,7 +1078,7 @@ export class UnitView {
     this.hpFill = bar(P, h, this.isEnemy ? (this.isBoss ? COLORS.hpBoss : COLORS.hpEnemy) : COLORS.hpAlly);
     // a negative-HP pool (斩业星熊's 我执), drawn over the drained HP bar as the red bar
     this.negFill = bar(P, h, COLORS.hpNeg);
-    this.shieldBar = bar(P, h, COLORS.shield, 0.95);
+    this.shieldBar = bar(P, h, COLORS.shield, 0.95);   // the shield's share of the HP bar — no line of its own any more
     this.spBg = bar(P, h, COLORS.hpBack, 0.85);
     this.spFill = bar(P, h, COLORS.sp);
     this.spGlow = new P.Sprite(fxAtlas().tex.glow);
@@ -1156,6 +1177,7 @@ export class UnitView {
     this.hp = hp;
     this.sp = s.sp; this.spMax = s.spMax;
     this.ammo = s.ammo || null; this.wolves = s.wolves || null; this.neg = s.neg > 0 ? Math.min(1, s.neg) : 0;
+    this.shield = s.shield > 0 ? s.shield : 0;
     this.coins = s.coins || null;
     this.energy = s.energy || null;
     this.layers = s.layers > 0 ? s.layers | 0 : 0; this.charges = s.charges || null;
@@ -1239,18 +1261,21 @@ export class UnitView {
   }
 
   /**
-   * Whether this unit should show its Back model: facing UP and a Back model exists — while it stands. A dead or
-   * knocked-out one keeps the Back model only when that skeleton has a fall of its own (4 of the 135 Back models); the
-   * others have no Die clip, so the Front model shows the fall and the held knocked-down pose (GitHub issue #25: the
-   * Back model went on with its attack loop under the redeploy ring) [ASSUMED: no source says which model the official
-   * client lies down with; a Back skeleton without a Die clip cannot show a fall].
+   * Whether this unit should show its Back model: facing UP and a Back model exists — while it stands. The direction is
+   * the DISPLAY one (`viewDir` when a cosmetic facing plugin turned the model, else the deploy `dir`: that one rotates the
+   * attack range and is never changed by the plugin). A dead or knocked-out one keeps the Back model only when that
+   * skeleton has a fall of its own (4 of the 135 Back models); the others have no Die clip, so the Front model shows the
+   * fall and the held knocked-down pose (GitHub issue #25: the Back model went on with its attack loop under the
+   * redeploy ring) [ASSUMED: no source says which model the official client lies down with; a Back skeleton without a
+   * Die clip cannot show a fall].
    */
   _wantsBack() {
     const a = this.ctx.assets;
     const id = this.info.spine || this.info.defId;
     // an appearance may ship its own Front/Back pair, so both questions are asked of the skin, not the operator
-    // (docs/SKINS.md): hasBackSpine falls back to the operator's own Back when the skin has none
-    if (this.isEnemy || this.dir !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
+    // (docs/SKINS.md): hasBackSpine falls back to the operator's own Back when the skin has none. The display facing
+    // (viewDir, render/facing.js) counts as UP too: an UP-facing skin's own Back pair is used for the turn.
+    if (this.isEnemy || (this.viewDir || this.dir) !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
     return this.alive || dieClipDur(typeof a.spineEntry === 'function' ? a.spineEntry(id, this.info.skin ? { back: true, skin: this.info.skin } : { back: true }) : null) > 0;
   }
 
@@ -1308,20 +1333,75 @@ export class UnitView {
   }
 
   /**
-   * Re-orient an operator / summon (UP|RIGHT|DOWN|LEFT, any case; the direction wheel's live preview and the stored
-   * m.private `dir`). Mirrors for LEFT, swaps to the Back model for UP (and back) when the model differs.
+   * Re-orient an operator / summon for real (UP|RIGHT|DOWN|LEFT, any case; the direction wheel's live preview and the
+   * stored m.private `dir`). Mirrors for LEFT, swaps to the Back model for UP (and back) when the model differs. A real
+   * re-orientation wins over a cosmetic one: the view dir is cleared. No transition — that is setViewDir's.
    */
   setDir(dir) {
     if (this.isEnemy || this.destroyed) return;
     const d = unitDir({ dir, facing: this.facing });
     if (typeof dir !== 'string' || d === this.dir) return;
+    this.viewDir = null;
     this.dir = d;
     this.info.dir = d;
     this.hasDir = true;
     this.facing = d === 'LEFT' ? -1 : 1;
     this.visFacing = this.facing;
+    this._flipT = 1;                          // settled: this turn is immediate
+    this._flip = this.modelFlip();
+    this._flipSquash = 1;
+    this._flipSwap = false;
     if (this.imp) this.imp.dirty = true;
     this._syncModel();
+  }
+
+  /**
+   * Turn the MODEL only (a cosmetic facing plugin: b.ev 'vdir', shared/protocol.js EV.VDIR — Battle.setViewDir). `dir` =
+   * UP|RIGHT|DOWN|LEFT, or null to show the deploy direction again. The unit keeps fighting as deployed: `this.dir`, its
+   * attack range and every directional effect are untouched — the detail card and the range preview read `info.dir`,
+   * which is why it is not written here. Where the model has to change with the direction (Front ⇄ Back for UP / DOWN,
+   * the mirror for LEFT) the change runs as a flip: the drawn width sweeps to edge-on, the model swaps there, and it
+   * opens again the other way — `seconds` is that transition (0 = an instant turn, the default for an older sender).
+   */
+  setViewDir(dir, seconds = 0) {
+    if (this.isEnemy || this.destroyed) return;
+    let d = null;
+    if (typeof dir === 'string') {
+      const u = dir.trim().toUpperCase();
+      if (!DIRS.includes(u)) return;
+      d = u;
+    }
+    if (d === this.viewDir) return;
+    const wasBack = this._wantsBack();
+    this.viewDir = d;
+    this.visFacing = (d || this.dir) === 'LEFT' ? -1 : 1;
+    const swap = wasBack !== this._wantsBack();
+    const dur = Number(seconds);
+    this._startFlip(Number.isFinite(dur) ? Math.max(0, dur) : 0, swap);
+    if (this.imp) this.imp.dirty = true;
+  }
+
+  /**
+   * Begin the flip transition toward the direction the model now wants (`modelFlip()`): the drawn sign sweeps from where
+   * it is now to the new one over `dur` seconds. With `swap` the model itself changes at the midpoint, so the width is
+   * squashed to 0 there (that is where `_syncModel` swaps Front ⇄ Back, hidden by the zero width). dur <= 0 turns at once.
+   */
+  _startFlip(dur, swap) {
+    const to = this.modelFlip();
+    this._flipFrom = this._flip;
+    this._flipTo = to;
+    this._flipSwap = !!swap;
+    if (!(dur > 0)) {
+      this._flip = to;
+      this._flipT = 1;
+      this._flipDur = 0;
+      this._flipSquash = 1;
+      if (swap) this._syncModel();
+      return;
+    }
+    this._flipT = 0;
+    this._flipDur = Math.min(1, dur);
+    this._flipSquash = 1;   // (the first frame's easings decide; never start invisible)
   }
 
   _releaseEntry(entry) {
@@ -1344,8 +1424,38 @@ export class UnitView {
     this._actorEntry = null;
   }
 
-  /** An attack was made (b.ev 'atk'). `target` = view or null. */
-  onAttack(target, now, kind) {
+  /**
+   * An attack was made (b.ev 'atk'). `target` = view or null. `multi` = this operator attacked more than one target in
+   * this frame (群攻): the model is left alone then, the owner's rule.
+   */
+  /**
+   * The unit attacked `target`: keep the MODEL facing it (the display-only facing, `setViewDir` — never `dir` / the range)
+   * and restart the 3 s hold. Called from two places, both BEFORE the swing is visible: the look-ahead (app.js onUpcoming)
+   * as the attack clip starts winding up (the owner's rule: 朝向优先, then the animation), and `onAttack` for an attack that
+   * had no look-ahead (its clip starts at the strike frame). Operators / summons only, nothing while it cannot act.
+   *
+   * The hold restarts on EVERY attack, not only on one that needs a turn: refreshing it only when `dir` changed made the
+   * model revert to its deployed facing mid-fight once the 3 s from the last actual turn ran out — the 「偶尔没有 3 秒计时
+   * 就转回去」 the owner reported. A 群攻 hit (`multi`) restarts it too but never turns (its targets differ every swing).
+   * @returns {boolean} whether the model turned
+   */
+  faceTarget(target, multi = false) {
+    if (this.isEnemy || this.info.kind !== 'op') return false;
+    const held = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
+    if (held) return false;
+    const dir = facingToward(this, target);
+    if (!dir) return false;
+    this.facingFor = FACING_HOLD_S;                     // 3 s from the LAST attack, turn or no turn (update counts it down)
+    if (multi || dir === (this.viewDir || this.dir)) return false;
+    this.setViewDir(dir, FACING_FLIP_S);
+    return true;
+  }
+
+  /**
+   * An attack was made (b.ev 'atk'). `target` = view or null. `multi` = this operator attacked more than one target in
+   * this frame (群攻): the model is left alone then, the owner's rule.
+   */
+  onAttack(target, now, kind, multi = false) {
     if (!this.alive) return;
     this._attackForm(kind);
     this._pendingDeployElapsed = null;
@@ -1353,16 +1463,20 @@ export class UnitView {
     const once = !!PROJ[kind]?.once;
     if (!once) {
       if (this.lastAtk >= 0) {
-        const d = now - this.lastAtk;
-        if (d > 0.05 && d < 6) this.atkInterval = this.atkInterval * 0.6 + d * 0.4;
+        // the real gap between two attacks: the first one replaces the estimate, later ones smooth into it
+        const r = nextAtkInterval(this.atkInterval, now - this.lastAtk, this.atkSeen);
+        this.atkInterval = r.interval;
+        if (r.measured) this.atkSeen = true;
       }
       this.lastAtk = now;
     }
-    if (target && !this.isEnemy && this.info.kind !== 'device') {
-      // operators keep their deploy direction (research 09 §1.2); enemies may turn towards their target
-    } else if (target && this.isEnemy) {
+    if (target && this.isEnemy) {
       const dx = target.x - this.x;
       if (Math.abs(dx) > 0.1) this.visFacing = dx < 0 ? -1 : 1;
+    } else if (target) {
+      // an attack without a look-ahead: its clip starts at the strike frame, so the turn has to happen now (a wound-up
+      // attack already turned in onUpcoming, and this is then a no-op)
+      this.faceTarget(target, multi);
     }
     if (target) {
       const dx = target.x - this.x, dy = target.y - this.y, len = Math.hypot(dx, dy) || 1;
@@ -1384,6 +1498,20 @@ export class UnitView {
     const ok = this.actor.windUp(this.atkInterval, lead, !!PROJ[kind]?.once);
     if (ok && this.imp) this.imp.dirty = true;
     return ok;
+  }
+
+  /**
+   * The sim says this unit's attack interval CHANGED (.ev ['rate', id, seconds], EV.RATE): a skill or an attack-speed
+   * buff. It is authoritative, so the attack clip is paced right on the NEXT wind-up instead of waiting for the view to
+   * measure two attacks (render/attackRate.js; 惊蛰's skill was the case). Later measured gaps still smooth into it.
+   */
+  setAtkInterval(seconds) {
+    const v = Number(seconds);
+    if (!Number.isFinite(v) || v <= 0) return;
+    this.atkInterval = clampAtkInterval(v);
+    this.atkSeen = true;
+    if (this.actor) this.actor.interval = this.atkInterval;
+    if (this.imp) this.imp.dirty = true;
   }
 
   onHit() { this.flash = 1; }
@@ -1562,8 +1690,31 @@ export class UnitView {
       }
     }
     const P = this.P;
+    // The model that turned toward an attack (faceTarget, restarted by every attack) goes back to its deployed direction
+    // this long after the last one — counted down here so it needs no battle clock. Frozen while the unit cannot act: a
+    // stunned / frozen / sleeping model must not turn back (it may only turn once it can act again).
+    if (this.facingFor > 0) {
+      const held = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
+      if (!held) this.facingFor -= Number.isFinite(dt) ? Math.max(0, dt) : 0;
+      if (this.facingFor <= 0) { this.facingFor = 0; if (this.viewDir && !this.isEnemy) this.setViewDir(null, FACING_FLIP_S); }
+    }
     // the model for the state the frame's events and snapshot left (Front ⇄ Back when it went down / stood up: die, revive)
     if (this._modelDirty) { this._modelDirty = false; this._syncModel(); }
+    // a cosmetic turn in progress (setViewDir): the drawn horizontal sign sweeps toward the direction the model wants
+    // now, edge-on at the midpoint when the model itself changes — Front ⇄ Back is swapped right there, hidden by the
+    // zero width. Advanced here (before the cull) so a turn finishes even while the unit is off screen.
+    if (this._flipT < 1) {
+      this._flipT = Math.min(1, this._flipT + (Number.isFinite(dt) ? Math.max(0, dt) : 0) / Math.max(1e-3, this._flipDur));
+      const e = this._flipT * this._flipT * (3 - 2 * this._flipT);   // smoothstep: no jerk at either end
+      this._flip = this._flipFrom + (this._flipTo - this._flipFrom) * e;
+      this._flipSquash = this._flipSwap ? Math.abs(1 - 2 * e) : 1;
+      if (this._flipSwap && this._flipT >= 0.5) { this._flipSwap = false; this._syncModel(); }
+      if (this._flipT >= 1) { this._flip = this._flipTo; this._flipSquash = 1; }
+    } else {
+      // settled: follow whatever the view wants (an enemy's walk flip, a real setDir, a form change)
+      this._flip = this.modelFlip();
+      this._flipSquash = 1;
+    }
     // a failed / timed-out model load is tried again once its wait is over (SPINE_RETRY_MS; frames only: never hidden)
     if (this._retryAt && nowMs() >= this._retryAt) { this._retryAt = 0; if (!this.actor && !this._spineBusy) this._loadSpine(true); }
     // a load begun in a hidden tab and still in flight SPINE_STUCK_MS after it came back: started again (GitHub #68)
@@ -1616,7 +1767,8 @@ export class UnitView {
     this.root.zIndex = unitDepthKey(cam, this.x, this.y, this.lift);
     // off-screen: nothing to animate or draw (bounds / hit-testing still follow `screen`)
     if (this._cull(bx, by, s, dt)) return;
-    const flip = this.modelFlip();
+    // the drawn horizontal sign: the settled one, or the flip transition's current value squashed toward edge-on
+    const flip = this._flipT >= 1 ? this._flip : this._flip * this._flipSquash;
 
     // shadow (on a raised top it is drawn with that block row, else in the shadow layer under everything); an enemy
     // flyer's lies on the tile under it while its body hovers from the road (shadowZ, GitHub #277)
@@ -1765,25 +1917,39 @@ export class UnitView {
     this.shake = Math.max(0, this.shake - dt);
     const x0 = x - bw / 2 + sx;
     let cy = y - 4;
-    // HP
+    // HP — with a shield standing, the bar's total is maxHp + shield: the green fill is the HP's share of that total and
+    // the shield is the white share right after it (b.snap `shield`), so one bar reads "this life + this much shield".
+    // A hit-negating 护盾 (泥岩's layers, no HP amount) keeps a legible white cap at the green's end instead.
+    const sh = showHp ? this.shield : 0;
+    const tot = Math.max(1e-6, this.maxHp + sh);
     this.hpBg.visible = this.hpFill.visible = this.hpGhost.visible = showHp;
+    let hpK = 0;
     if (showHp) {
-      const k = this.maxHp > 0 ? clamp(this.hp / this.maxHp, 0, 1) : 0;
+      hpK = clamp(this.hp / tot, 0, 1);
       if (this.ghostHp < this.hp) this.ghostHp = this.hp;
       else this.ghostHp = Math.max(this.hp, this.ghostHp - this.maxHp * dt * 0.9);
-      const g = this.maxHp > 0 ? clamp(this.ghostHp / this.maxHp, 0, 1) : 0;
+      const g = clamp(this.ghostHp / tot, 0, 1);
       this.hpBg.position.set(x0 - 1, cy); this.hpBg.width = bw + 2; this.hpBg.height = bh + 2;
       this.hpGhost.position.set(x0, cy); this.hpGhost.width = bw * g; this.hpGhost.height = bh;
-      this.hpFill.position.set(x0, cy); this.hpFill.width = bw * k; this.hpFill.height = bh;
-      if (!this.isEnemy) this.hpFill.tint = k < 0.3 ? COLORS.hpAllyLow : COLORS.hpAlly;
+      this.hpFill.position.set(x0, cy); this.hpFill.width = bw * hpK; this.hpFill.height = bh;
+      // the low-HP colour is the HP's own share of maxHp: a shield must not make a full-HP bar look drained
+      if (!this.isEnemy) this.hpFill.tint = (this.maxHp > 0 ? this.hp / this.maxHp : 0) < 0.3 ? COLORS.hpAllyLow : COLORS.hpAlly;
     }
     // 业火 我执: her HP sits on the 1-HP floor and the damage past it fills a pool — the red bar over the drained green one
     const neg = showHp ? this.neg : 0;
     this.negFill.visible = neg > 0;
     if (neg > 0) { this.negFill.position.set(x0, cy); this.negFill.width = bw * neg; this.negFill.height = bh; }
-    const shielded = showHp && (this.flags & UF.SHIELD);
-    this.shieldBar.visible = !!shielded;
-    if (shielded) { this.shieldBar.position.set(x0, cy - bh / 2 - 1); this.shieldBar.width = bw; this.shieldBar.height = Math.max(1.5, bh * 0.35); }
+    // the shield shares the HP bar (the old thin line above it is gone): white, right where the green ends. A layer 护盾
+    // has no HP amount, so it is a fixed cap instead of a share — pulled inside the bar's end when the green fills it
+    // (a full-HP 泥岩 with 沃土予身 still shows it, at the tail of the green)
+    let shX = 0;
+    let shW = 0;
+    if (showHp) {
+      if (sh > 0) { shX = hpK; shW = Math.min(1 - hpK, sh / tot); }
+      else if (this.layers > 0) { shW = Math.min(1, 6 / Math.max(1, bw)); shX = Math.min(hpK, 1 - shW); }
+    }
+    this.shieldBar.visible = shW > 0;
+    if (shW > 0) { this.shieldBar.position.set(x0 + bw * shX, cy); this.shieldBar.width = bw * shW; this.shieldBar.height = bh; }
     // SP — or, while an ammo skill runs, its magazine: yellow cells, one per round, emptying from the right (b.snap `ammo`;
     // the SP bar's own fraction, ammoLeft / ammoMax, is the same width). Without an `ammo` row the bar is the plain SP bar.
     const ammo = !this.isEnemy ? this.ammo : null;

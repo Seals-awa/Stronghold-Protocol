@@ -114,6 +114,19 @@ export function deployFoldsShop(o) {
 }
 
 /**
+ * Whether the deploy interaction may move the camera: 设置「部署时放大视角」 (prepDeployZoom, default on) AND a deploy fold.
+ * Off, the shop still folds for the interaction (issue #602) but the board keeps the camera the player had — the owner asked
+ * for a way to drag a piece around without the view zooming in. Only an explicit `false` turns it off, so a profile saved
+ * before the switch zooms like 0.3.1 did.
+ * @param {boolean} deployFold the deploy fold this frame (deployFoldsShop)
+ * @param {boolean|undefined} setting 设置「部署时放大视角」
+ * @returns {boolean}
+ */
+export function deployZooms(deployFold, setting) {
+  return !!deployFold && setting !== false;
+}
+
+/**
  * Whether this frame's deploy fold should zoom the board, and whether a zoom already applied must be given back now.
  * `zoomed` is the previous frame's deploy zoom (the caller remembers it). Turning 设置「部署时收起商店」 off while a
  * piece is still held (`deployFold` becomes false) releases that zoom on this one frame — later frames of the same

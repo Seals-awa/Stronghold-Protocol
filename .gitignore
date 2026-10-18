@@ -1,21 +1,21 @@
 # --- dependencies & generated client libs -------------------------------------------------------
 node_modules/
-# a local npm cache (npm_config_cache=./.npm-cache, npm ci --cache .npm-cache — GitHub #258)
+# a local npm cache (npm_config_cache=./.npm-cache, npm ci --cache .npm-cache 鈥?GitHub #258)
 .npm-cache/
 # copied from node_modules by tools/vendor.mjs (postinstall); never commit third-party builds
 public/vendor/
 
 # --- game assets: (c) Hypergryph / Yostar, fetched or extracted locally, NEVER committed ----------
-# tools/fetch-assets.mjs → public/assets/** (~270 MB) and public/fonts/** (+ fonts.css)
+# tools/fetch-assets.mjs 鈫?public/assets/** (~270 MB) and public/fonts/** (+ fonts.css)
 public/assets/
 public/fonts/
-# tools/local-extract/extract.py → public/assets/local/** and this per-machine manifest
-# (optional: the client and the tests work without it; docs/DEPLOY.md §6 lists what falls back)
+# tools/local-extract/extract.py 鈫?public/assets/local/** and this per-machine manifest
+# (optional: the client and the tests work without it; docs/DEPLOY.md 搂6 lists what falls back)
 # Battlefield scenes (0.2.5): extracted files live under public/assets/local/scene/ (already ignored by
 # public/assets/ above). Downloaded bundles live in .cache/official-scenes/ (already ignored by .cache/ below).
 # The repository never stores those official files.
 data/local-assets.json
-# tools/local-extract/fx.py → the official battle effects' file list (DESIGN §33; the files under public/assets/local/fx/)
+# tools/local-extract/fx.py 鈫?the official battle effects' file list (DESIGN 搂33; the files under public/assets/local/fx/)
 data/local-fx.json
 # download caches, upstream tables, ledgers, reports, setup state
 .cache/
@@ -38,7 +38,7 @@ __pycache__/
 packs/index.json
 
 # --- plugins (docs/PLUGINS.md): a server's own plugins and its policy file live in plugins/ and are never committed;
-# only the folder's readme, its guide for AI agents (AGENTS.md) and the templates (plugins/_template/, from P1) are tracked — and
+# only the folder's readme, its guide for AI agents (AGENTS.md) and the templates (plugins/_template/, from P1) are tracked 鈥?and
 # so ship (tools/package.mjs); plugins/_dist/ (packed zips) and plugins/_moved/ (files the studio moved out) stay ignored
 plugins/*
 !plugins/README.md
@@ -65,3 +65,13 @@ desktop.ini
 .claude/
 # tools/sim-check.mjs: the corpus and its Node traces for /dev/sim-check.html
 public/dev/simcheck/data/
+
+# --- this install (a patched game tree): local secrets and packaging output -------------------------
+# plugins/.studio-key is the plugin studio write key (equivalent to a password): leaking it lets others edit your plugins
+plugins/.studio-key
+*.key
+# tools/package.mjs writes the release manifest only when packaging
+MANIFEST.json
+npm-debug.log*
+yarn-error.log*
+

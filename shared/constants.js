@@ -29,6 +29,37 @@ export const MAX_SPECTATORS = 2;
 export const ROOM_CODE_LEN = 4;
 export const NAME_MAX_LEN = 12;
 
+/**
+ * 战斗期倍速 (room.setBattleSpeed, room.state.battleSpeed): game seconds per real second a room's normal rounds and
+ * 联防 run at. The host picks it before the match: 2 (the classic forced 2×) or 4.
+ *
+ * It only changes the PACE, never the result: the simulation advances in fixed 1/30 s ticks and the speed decides how
+ * many of those ticks a real second gets, so the same battle spec plays out the same tick sequence (and yields the same
+ * result) at either speed — see server/match/fields.js and public/js/battle/runner.js.
+ *
+ * 最终攻势 / 隐秘核心 (kind 'boss' / 'hidden') always keep the base 2×: their shared leader HP pool is credited on the
+ * server's real-time field clock (bossRounds.js _bossDmgBudget), so a faster client would only have its damage held
+ * back — and could end its field before the pool it reports is actually credited.
+ */
+export const BATTLE_SPEEDS = Object.freeze([2, 4]);
+export const DEFAULT_BATTLE_SPEED = 2;
+/** Is `v` one of the room speeds a host may pick? */
+export const isBattleSpeed = (v) => v === 2 || v === 4;
+
+/**
+ * Game seconds per real second a battle of `kind` runs at: normal rounds and 联防 use the room's speed (the base when
+ * the room names none), the boss rounds always the base.
+ * @param {string} kind battle kind ('normal' | 'unite' | 'boss' | 'hidden')
+ * @param {number} base the base speed (Match.gameSpeed: the forced 2×, or opts.combatSpeed in tests / tools)
+ * @param {number|undefined} room the room's chosen speed (Match.battleSpeed)
+ * @returns {number}
+ */
+export const battleSpeedOf = (kind, base, room) => {
+  const b = Number(base) > 0 ? Number(base) : DEFAULT_BATTLE_SPEED;
+  if (kind === 'boss' || kind === 'hidden') return b;
+  return isBattleSpeed(room) ? room : b;
+};
+
 export const DIFFICULTIES = ['FUNNY', 'NORMAL', 'HARD', 'ABYSS'];
 export const DIFFICULTY_NAMES = { FUNNY: N_('标准模拟'), NORMAL: N_('险境模拟'), HARD: N_('绝境模拟'), ABYSS: N_('终极模拟') };
 export const DIFFICULTY_COLORS = { FUNNY: '#f6a329', NORMAL: '#e85a1a', HARD: '#e73118', ABYSS: '#ff0024' };

@@ -1,5 +1,4 @@
 {
-  "离线导入（不下载官方数据表）": "Import offline (do not download official data tables)",
   "_meta": {
     "type": "lang",
     "lang": "en",
@@ -15,6 +14,7 @@
     "complete": true
   },
   "_about": "English UI strings: Chinese msgid → English (shared/i18n.js t(); docs/I18N.md). Placeholders {name} and {n|one|other} as in the msgid; a 'context::msgid' key is a tc() variant. Seeded from GitHub PR #70 (branch en-translation) by @YuriRestia, reused with credit (NOTICE.md). Game texts are not here: data/i18n/en.json (tools/build-i18n.mjs).",
+  "离线导入（不下载官方数据表）": "Import offline (do not download official data tables)",
   "你已在其他同盟中，请先离开当前同盟": "You are already in another Alliance. Leave it first.",
   "你已不在该同盟中": "You are no longer in this Alliance",
   "创建者已离开，同盟已解散": "The host left. The Alliance has been disbanded.",
@@ -2188,5 +2188,10 @@
   "删除这台浏览器里、当前服务器版本已经用不到的导入素材；仍在使用的会保留。": "Delete the imported assets in this browser that this server's current version no longer uses; the ones still in use stay.",
   "已清理 {n} 个旧版本文件。": "Cleared {n} old-version files.",
   "没有需要清理的旧版本文件。": "No old-version files to clear.",
-  "读不到服务器的素材清单，没有删除任何文件。": "Could not read the server's asset lists; nothing was deleted."
+  "读不到服务器的素材清单，没有删除任何文件。": "Could not read the server's asset lists; nothing was deleted.",
+  "作战与联防的推进速度。只加快节奏：战斗仍按固定的 1/30 秒推进，结果不变。最终攻势与隐秘核心始终为 ×2。": "How fast normal battles and co-op defences advance. Pace only: a battle still steps a fixed 1/30 s, so its result never changes. Final Assault / Hidden Core always stay at ×2.",
+  "战斗速度": "Battle speed",
+  "本局战斗速度 ×{speed}（创建者在房间中设置；只加快节奏，战斗结果不变）": "Battle speed ×{speed} (set by the room's creator; pace only, the result never changes)",
+  "部署时放大视角": "Zoom on pickup",
+  "拖起干员、装备或召唤物时，镜头推近到收起商店后的棋盘。关闭后只收起商店、镜头保持不动，摆位时不会突然放大。": "Picking up an operator, equipment or summon pushes the camera in to the shop-collapsed board. Off, the shop still folds but the camera stays where it is, so placing a piece never zooms in on you."
 }
