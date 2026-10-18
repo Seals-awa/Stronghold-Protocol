@@ -88,6 +88,7 @@ import { MANIFOLD, isManifold, manifoldCopyForm, manifoldAttackForm } from './ma
 import { diamondTexture, shadowTexture, fxAtlas, tierChip, statusTexture, itemTexture, hudRings, ringArc, downLabel, HUD_DISC, ELEMENT_RING } from './textures.js';
 import { COLORS, TIER_COLORS, ENEMY_FRAME, UNIT, PROJ, statusIconKey, statusIconSuppressed } from './style.js';
 import { drawCrate, rowDepthKey, ROW_KEY, deviceBoxOf, DEVICE_BOX } from './tiles.js';
+import { facingToward, FACING_HOLD_S } from './facing.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const DIRS = ['UP', 'RIGHT', 'DOWN', 'LEFT'];
@@ -682,6 +683,11 @@ export class UnitView {
     this.hasDir = !this.isEnemy && typeof info.dir === 'string' && DIRS.includes(info.dir.toUpperCase());
     this.facing = this.dir === 'LEFT' ? -1 : 1;
     this.visFacing = this.isEnemy ? -1 : this.facing;
+    // DISPLAY-ONLY facing (render/facing.js): the direction the MODEL is drawn in while `dir` — the deploy direction that
+    // rotates the attack range, picks Front / Back and drives every directional effect — stays where the player put it.
+    // null = as `dir`. faceTarget sets it before a swing; the hold (facingFor) takes it back.
+    this.viewDir = null;
+    this.facingFor = 0;           // seconds left before an attack-turned model goes back to its deployed direction
     this.hp = Number(info.maxHp) || 1; this.maxHp = Number(info.maxHp) || 1; this.ghostHp = this.hp;
     this.sp = 0; this.spMax = 0;
     this.ammo = null;             // [rounds left, rounds in the magazine] while an ammo skill runs (sync; b.snap `ammo`)
@@ -1250,7 +1256,7 @@ export class UnitView {
     const id = this.info.spine || this.info.defId;
     // an appearance may ship its own Front/Back pair, so both questions are asked of the skin, not the operator
     // (docs/SKINS.md): hasBackSpine falls back to the operator's own Back when the skin has none
-    if (this.isEnemy || this.dir !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
+    if (this.isEnemy || (this.viewDir || this.dir) !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
     return this.alive || dieClipDur(typeof a.spineEntry === 'function' ? a.spineEntry(id, this.info.skin ? { back: true, skin: this.info.skin } : { back: true }) : null) > 0;
   }
 
@@ -1320,6 +1326,42 @@ export class UnitView {
     this.hasDir = true;
     this.facing = d === 'LEFT' ? -1 : 1;
     this.visFacing = this.facing;
+    // a real re-orientation wins over a display-only one (and must not spring back after the hold)
+    this.viewDir = null;
+    this.facingFor = 0;
+    if (this.imp) this.imp.dirty = true;
+    this._syncModel();
+  }
+
+  /**
+   * Turn the MODEL toward `target` (render/facing.js) — display only, `dir` / the attack range never move. Called before a
+   * swing starts: render/app.js windUpAttacks faces the unit, then winds the attack clip up, so the strike already faces
+   * the right way; `onAttack` does the same for an attack that had no look-ahead left.
+   * No turn while the operator cannot act, none for a multi-target hit (群攻: its targets differ every swing).
+   * @param {{ x: number, y: number }|null} target the target's view (positions in tiles)
+   * @param {boolean} [multi] this attack hit more than one target
+   * @returns {boolean} whether the model turned
+   */
+  faceTarget(target, multi = false) {
+    if (this.isEnemy || this.destroyed) return false;
+    const held = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
+    if (held) return false;
+    const d = facingToward(this, target);
+    if (!d) return false;
+    this.facingFor = FACING_HOLD_S;          // 3 s from the LAST attack, whether or not this one needs a turn
+    if (multi || d === (this.viewDir || this.dir)) return false;
+    this.viewDir = d;
+    this.visFacing = d === 'LEFT' ? -1 : 1;
+    if (this.imp) this.imp.dirty = true;
+    this._syncModel();                       // UP ⇄ something else may need the other model (Front / Back)
+    return true;
+  }
+
+  /** Go back to the deployed direction (the hold expired). A no-op when the model never turned. */
+  clearFacing() {
+    if (!this.viewDir || this.isEnemy) return;
+    this.viewDir = null;
+    this.visFacing = this.facing;
     if (this.imp) this.imp.dirty = true;
     this._syncModel();
   }
@@ -1344,8 +1386,11 @@ export class UnitView {
     this._actorEntry = null;
   }
 
-  /** An attack was made (b.ev 'atk'). `target` = view or null. */
-  onAttack(target, now, kind) {
+  /**
+   * An attack was made (b.ev 'atk'). `target` = view or null. `multi` = this operator hit more than one target in this
+   * frame (群攻): the model is not turned then (render/facing.js faceTarget).
+   */
+  onAttack(target, now, kind, multi = false) {
     if (!this.alive) return;
     this._attackForm(kind);
     this._pendingDeployElapsed = null;
@@ -1358,11 +1403,13 @@ export class UnitView {
       }
       this.lastAtk = now;
     }
-    if (target && !this.isEnemy && this.info.kind !== 'device') {
-      // operators keep their deploy direction (research 09 §1.2); enemies may turn towards their target
-    } else if (target && this.isEnemy) {
+    if (target && this.isEnemy) {
       const dx = target.x - this.x;
       if (Math.abs(dx) > 0.1) this.visFacing = dx < 0 ? -1 : 1;
+    } else if (target) {
+      // the MODEL follows the target it hits (render/facing.js; `dir` and the range stay deployed). A wound-up attack was
+      // already turned by the look-ahead (render/app.js windUpAttacks), so this is a no-op then — it restarts the hold.
+      this.faceTarget(target, multi);
     }
     if (target) {
       const dx = target.x - this.x, dy = target.y - this.y, len = Math.hypot(dx, dy) || 1;
@@ -1564,6 +1611,14 @@ export class UnitView {
     const P = this.P;
     // the model for the state the frame's events and snapshot left (Front ⇄ Back when it went down / stood up: die, revive)
     if (this._modelDirty) { this._modelDirty = false; this._syncModel(); }
+    // The model that turned toward an attack (faceTarget) goes back to its deployed direction this long after the last one
+    // — counted down here, and frozen while the unit cannot act (a stunned / frozen / sleeping model must not turn back;
+    // it may only turn once it can act again).
+    if (this.facingFor > 0) {
+      const heldFace = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
+      if (!heldFace) this.facingFor -= Number.isFinite(dt) ? Math.max(0, dt) : 0;
+      if (this.facingFor <= 0) { this.facingFor = 0; this.clearFacing(); }
+    }
     // a failed / timed-out model load is tried again once its wait is over (SPINE_RETRY_MS; frames only: never hidden)
     if (this._retryAt && nowMs() >= this._retryAt) { this._retryAt = 0; if (!this.actor && !this._spineBusy) this._loadSpine(true); }
     // a load begun in a hidden tab and still in flight SPINE_STUCK_MS after it came back: started again (GitHub #68)
