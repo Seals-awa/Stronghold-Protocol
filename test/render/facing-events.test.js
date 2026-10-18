@@ -139,14 +139,28 @@ describe('the turn happens when the animation starts, and only then', () => {
     assert.equal(v.viewDir, null, 'the first target of an area attack does not turn the model either');
   });
 
-  test('a delayed batch turns immediately (before its clip starts) instead of restarting it', async () => {
+  test('a delayed batch turns BEFORE its clip starts, never during it', async () => {
     const { v } = await ally({ dir: 'RIGHT' });
-    // no look-ahead left: onAttack turns with { instant: true }, then starts the clip
-    assert.equal(v.faceTarget(at(4, 12), false, { instant: true }), true);
-    assert.equal(v.entryBack, true, 'the skeleton swap is done before the clip starts');
-    assert.equal(v._flipSwap, false, 'nothing left to swap later (that would replay a clip already striking)');
-    v.onAttack(at(4, 12), 0, 'none', false);
-    assert.equal(v.viewDir, 'UP');
+    // what render/app.js windUpAttacks does: ask, turn (swap included), then start the clip
+    assert.equal(v.canWindUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.4, instant: true }), true);
+    assert.equal(v.entryBack, true, '换骨架 already done: the new model starts the clip from its first frame');
+    assert.equal(v._flipSwap, false, 'nothing left to swap later (that would replay a swing already playing)');
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.actor.current, 'Attack');
+    // the deferred path (an attack with no look-ahead left) may not turn the model mid-swing
+    const before = v.viewDir;
+    v.onAttack(at(1, 9), 0, 'none', false);
+    assert.equal(v.viewDir, before, 'onAttack never turns now: its clip starts at the strike frame');
+  });
+
+  test('a turn that cannot finish before the strike is skipped (no turning during the swing)', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    assert.equal(v.windUp(0.4, 'none'), true);                 // the clip is playing now
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.05 }), false, 'too little lead: 0.15 s cannot pass before the strike');
+    assert.equal(v.viewDir, null);
+    // and the next attack, with a full look-ahead, does turn it
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.4 }), true);
   });
 });
 

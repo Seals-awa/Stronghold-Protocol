@@ -1424,6 +1424,10 @@ export class UnitView {
     const aim = mode.flags.firstCast ? this._firstCastTarget(target, mode.clip) : target;
     const d = this.isEnemy ? this._enemyTurnDir(aim) : facingToward(this, aim);
     if (!d) return false;
+    // THE TURN MUST FINISH BEFORE THE STRIKE (FACING_TURN_S): a turn that cannot be over by then would still be running
+    // during the swing — which is exactly what "the model turns while the attack clip is playing" was. With too little
+    // lead the facing is left alone; the next attack, with a full look-ahead, turns it.
+    if (Number.isFinite(opts.lead) && opts.lead < FACING_TURN_S) return false;
     if (mode.flags.forceDir || mode.flags.checkDown) {
       const clip = (d === 'UP' ? mode.row?.[2] : d === 'DOWN' ? mode.row?.[3] : '') || '';
       if (clip && this._playFaceClip(clip)) return true;    // the direction-specific clip is drawn by the skeleton
@@ -1522,10 +1526,11 @@ export class UnitView {
   }
 
   /**
-   * An attack was made (b.ev 'atk'). `target` = view or null. `multi` = this operator hit more than one target in this
-   * frame (群攻): the model is not turned then (render/facing.js faceTarget).
+   * An attack was made (b.ev 'atk'). `target` = view or null. `multi` = this attack hit more than one target (群攻) — kept
+   * for the caller (render/app.js counts the look-ahead's groups) and unused here: the facing is turned by the look-ahead
+   * before the clip starts, never from this strike-frame path.
    */
-  onAttack(target, now, kind, multi = false) {
+  onAttack(target, now, kind, _multi = false) {
     if (!this.alive) return;
     this._attackForm(kind);
     this._pendingDeployElapsed = null;
@@ -1542,9 +1547,9 @@ export class UnitView {
       const dx = target.x - this.x;
       if (Math.abs(dx) > 0.1 && !this.viewDir) this.visFacing = dx < 0 ? -1 : 1;
     } else if (target) {
-      // the MODEL follows the target it hits (render/facing.js; `dir` and the range stay deployed). A wound-up attack was
-      // already turned by the look-ahead (render/app.js windUpAttacks), so this is a no-op then — it restarts the hold.
-      this.faceTarget(target, multi, { instant: true });   // no look-ahead left: the clip starts at the strike frame
+      // The look-ahead already turned the model BEFORE this attack's clip started (render/app.js windUpAttacks: canWindUp →
+      // faceTarget → windUp). Here the clip is starting right now, at its strike frame, so any turn would run through the
+      // swing — none is made: the facing the look-ahead gave it (or the deployed one) stands.
     }
     if (target) {
       const dx = target.x - this.x, dy = target.y - this.y, len = Math.hypot(dx, dy) || 1;
@@ -1553,6 +1558,19 @@ export class UnitView {
     this.lunge = 1;
     if (this.actor) this.actor.attack(this.atkInterval, once); // game seconds: the actor's clock runs in game time
     if (this.imp) this.imp.dirty = true;
+  }
+
+  /**
+   * Would `windUp(lead, kind)` be accepted right now (SpineActor.canWindUp)? render/app.js asks BEFORE it turns the model:
+   * the turn has to come first, so the new model starts the clip from its first frame instead of the skeleton swap replaying
+   * a swing that is already playing.
+   * @param {number} lead game seconds until the strike frame
+   * @param {string} [kind] the 'atk' projKind (a one-off cast winds up at the clip's own speed)
+   * @returns {boolean}
+   */
+  canWindUp(lead, kind) {
+    if (!this.alive || !this.actor || !this.spineReady) return false;
+    return typeof this.actor.canWindUp === 'function' && this.actor.canWindUp(this.atkInterval, lead, !!PROJ[kind]?.once);
   }
 
   /**

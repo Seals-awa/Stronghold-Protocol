@@ -1694,12 +1694,15 @@ export async function createFieldView(host, options = {}) {
     const tgt = views.get(e[2]) || battleView(e[2]);
     if (up.multi) MULTI_ATK.add(e);
     const lead = up.t - upcomingT;
-    // the wind-up is accepted first: a refused wind-up (a clip still recovering, a stunned actor) must not turn the model
+    // ASK BEFORE STARTING ANYTHING: a wind-up that would be refused (a clip still recovering, a stunned actor, too late for
+    // the strike frame) must not turn the model either.
+    if (v.canWindUp && !v.canWindUp(lead, e[3])) return;
+    // FACING FIRST (render/facing.js): the model turns — its Front ⇄ Back skeleton swap included — BEFORE the clip starts,
+    // so the new model plays the swing from its first frame. Turning after the clip had started replayed the swing, which
+    // read as the model turning in the middle of the attack. A 群攻 attack is left alone here and in `onAttack`.
+    if (tgt) v.faceTarget?.(tgt, up.multi, { lead, instant: true });
     if (!v.windUp(lead, e[3])) return;
     woundUp.add(e);
-    // FACING AT THE ANIMATION'S START (render/facing.js): the turn begins with the clip the wind-up just started. A 群攻
-    // attack is left alone here and in `onAttack` below.
-    if (tgt) v.faceTarget?.(tgt, up.multi, { lead });
     // the official cast effects that start with the cast play with the clip (render/vfx/wiring.js castStart)
     const a = v.actor;
     const skillOn = upSkill.has(e[1]) ? upSkill.get(e[1]) : undefined;
