@@ -29,12 +29,11 @@ function intendedRow(rows, n) {
 
 /** What render/units.js `_faceMode()` would resolve for that skill (candidate list, in its order). */
 function resolvedRow(rows, n, activeClip) {
-  // the same order render/units.js _faceMode() uses: the clip playing now, then the skill names, then the attack clip
-  const candidates = [
-    activeClip || `Skill_${n}_Loop`,
-    `Skill_${n}_Loop`, `Skill_${n}`, 'Skill_Loop', 'Skill',
-    'Attack', 'Attack',
-  ];
+  // mirrors render/units.js _faceMode(): while the skill runs the skill names decide; a skill clip playing now wins over
+  // the guesses. The attack clip only comes in when no skill row exists at all.
+  const clip = activeClip || `Skill_${n}_Loop`;
+  const skillNames = [`Skill_${n}_Loop`, `Skill_${n}`, 'Skill_Loop', 'Skill', clip];
+  const candidates = (/^skill/i.test(clip) ? [clip, ...skillNames] : skillNames).concat(['Attack', 'Attack']);
   return faceModeFor(rows, candidates);
 }
 

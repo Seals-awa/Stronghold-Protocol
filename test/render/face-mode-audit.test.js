@@ -24,13 +24,12 @@ function intendedRow(rows, n) {
   return best;
 }
 
-/** What render/units.js `_faceMode()` resolves for a clip playing now (same candidate order). */
+/** What render/units.js `_faceMode()` resolves while a skill runs and `activeClip` is playing (same candidate rule). */
 function resolvedRow(rows, n, activeClip) {
-  return faceModeFor(rows, [
-    activeClip || `Skill_${n}_Loop`,
-    `Skill_${n}_Loop`, `Skill_${n}`, 'Skill_Loop', 'Skill',
-    'Attack', 'Attack',
-  ]);
+  const clip = activeClip || `Skill_${n}_Loop`;
+  const names = [`Skill_${n}_Loop`, `Skill_${n}`, 'Skill_Loop', 'Skill', clip];
+  const candidates = (/^skill/i.test(clip) ? [clip, ...names] : names).concat(['Attack', 'Attack']);
+  return faceModeFor(rows, candidates);
 }
 
 const label = (row) => (row ? `${row[1]} (${row[0] || 'default'})` : '-');
@@ -83,4 +82,12 @@ test('the two operators the owner reported stay on the deployed direction throug
   // 忍冬 S3: the table says Target, so it DOES turn - the audit above proves that is what the renderer does
   const wild = FACE_MODES.char_4026_vulpis;
   assert.ok(faceModeFlags(faceModeFor(wild, ['Skill_3_Loop']).at(1)).target, '忍冬 S3 -> Target (turns)');
+});
+test('a skill keeps its own row even while an attack clip plays (野鬃 S2 was still turning)', () => {
+  const wild = FACE_MODES.char_496_wildmn;   // Attack = Target, Skill_2 = Default
+  // the window that mattered: the skill is on and the ATTACK clip is what the actor shows at the wind-up
+  const atWindUp = faceModeFor(wild, ['Skill_2_Loop', 'Skill_2', 'Skill_Loop', 'Skill', 'Attack', 'Attack']);
+  assert.ok(faceModeFlags(atWindUp.at(1)).def, 'S2 keeps the deployed direction even mid-swing');
+  // without the skill the Attack row is back in charge
+  assert.ok(faceModeFlags(faceModeFor(wild, ['Attack']).at(1)).target);
 });

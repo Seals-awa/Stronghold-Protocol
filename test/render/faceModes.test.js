@@ -211,3 +211,16 @@ describe('a skill drives the facing while it runs (野鬃 S2 / 深巡 S2 keep th
     });
   }
 });
+describe('the sim skill slot decides, not whatever skill clip the client happens to play', () => {
+  test('野鬃 S2 keeps the deployed direction even if the wrong skill slot is playing', async () => {
+    // the client's clip slot can lag behind the sim (a separate known bug); the face mode must not follow the wrong slot
+    const v = await view('char_496_wildmn', { dir: 'RIGHT', skillIndex: 2 });
+    v.setSkill(true);
+    await tick();
+    // pretend the actor is still on skill 1's loop (Target) while the sim says S2
+    if (v.actor) { v.actor.current = 'Skill_1_Loop'; }
+    assert.equal(v.windUp(0.4, 'none'), true);
+    assert.equal(v.faceTarget(at(1, 9), false, { lead: 0.4 }), false, 'no turn: the sim says S2, which keeps the facing');
+    assert.equal(v.viewDir, null);
+  });
+});

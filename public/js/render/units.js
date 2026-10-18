@@ -1465,9 +1465,19 @@ export class UnitView {
     // a skill that is running drives the facing (閲庨瑑 S2 / 娣卞贰 S2 are `Default`: the model keeps the deployed direction);
     // otherwise the attack clip that is about to start does, then whatever is playing now
     const attack = this._attackClipName();
-    // THE CLIP PLAYING NOW IS GROUND TRUTH (its row must win), then the skill names as a fallback for a clip the
-    // table does not name, then the attack clip the next wind-up would play
-    const candidates = [clip, ...skill, attack, 'Attack'].filter(Boolean);
+    // While a skill runs, the SKILL's rows decide — an attack clip playing at that moment must NOT drag the row back to
+    // the attack's own mode (野鬃 S2 is `Default`: the model keeps the deployed direction through the skill, even though
+    // its Attack row says Target). Within the skill, the clip actually playing is ground truth (a cast row `Skill_2_Begin`
+    // and a loop row `Skill_2_Loop` are different modes), then the skill names, then the attack clip.
+    // The sim's skill slot is authoritative (UnitInfo.skillIndex): the client's own clip may still be the OTHER slot
+    // (a known separate bug about picking skill clips), and trusting it here would read that slot's face mode.
+    const slot = (clip.match(/^skill[_\s]*(\d)/i) || [])[1];
+    const wantSlot = Number(this.info && this.info.skillIndex) || 0;
+    const clipUsable = !/^skill/i.test(clip) || !wantSlot || !slot || Number(slot) === wantSlot;
+    const skillClip = /^skill/i.test(clip) && clipUsable;
+    const candidates = (skill.length
+      ? (skillClip ? [clip, ...skill.filter((c) => c !== clip), attack, 'Attack'] : [...skill, attack, 'Attack'])
+      : [clip, attack, 'Attack']).filter(Boolean);
     const row = faceModeFor(this.faceRows, candidates);
     return { row, flags: faceModeFlags(row?.[1]), clip };
   }
