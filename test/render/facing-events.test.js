@@ -1,0 +1,211 @@
+// Operator model facing, end to end through the renderer's own event path (#730 review by the maintainer).
+//
+// The look-ahead groups the queued `atk` events with render/facing.js attackGroups() — one attack = one source at one
+// event time — and only a single-target attack whose wind-up was ACCEPTED turns the model. These tests build the real
+// SnapshotBuffer, feed real event tuples, and drive the real UnitView (fake PIXI stands in for the renderer), so they
+// cover the wiring the review asked for: a fast single-target attacker, a 群攻 attack, a delayed batch, a held (stunned)
+// operator, and a Front ⇄ Back switch while a skill clip is on.
+//   node --test test/render/facing-events.test.js
+import { test, describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { installFakePixi, fakeViewCtx } from './fakepixi.js';
+import { presetCamera } from '../../public/js/render/projection.js';
+import { SnapshotBuffer } from '../../public/js/render/interp.js';
+
+let fake, UnitView, attackGroups, FACING_TURN_S;
+before(async () => {
+  fake = installFakePixi();
+  ({ UnitView } = await import('../../public/js/render/units.js'));
+  ({ attackGroups, FACING_TURN_S } = await import('../../public/js/render/facing.js'));
+});
+after(() => fake.restore());
+
+const tick = () => new Promise((r) => setImmediate(r));
+const cam = () => presetCamera('prep', { width: 1280, height: 720 });
+
+/** Asset store with a Front and a Back model (the Back one for UP), plus a skill loop on the Front model. */
+function store() {
+  const front = {
+    skel: '/s/front.skel', atlas: '/s/front.atlas',
+    anims: { idle: 'Idle', attack: { loop: 'Attack' }, skill: { loop: 'Attack' }, deploy: 'Start' },
+    animations: { Idle: 1, Attack: 1, Start: 1 }, hits: { Attack: [0.4] },
+  };
+  const back = {
+    skel: '/s/back.skel', atlas: '/s/back.atlas',
+    anims: { idle: 'Idle', attack: { loop: 'Attack' }, skill: { loop: 'Attack' }, deploy: 'Start' },
+    animations: { Idle: 1, Attack: 1, Start: 1 }, hits: { Attack: [0.4] },
+  };
+  const log = [];
+  return {
+    log, front, back,
+    picture: () => null,
+    image: async () => null,
+    hasBack: () => true,
+    spineEntry: (id, o) => { const backWanted = !!(o && o.back); log.push(backWanted); return backWanted ? back : front; },
+    spine: { acquire: async () => ({ animations: [{ name: 'Idle' }, { name: 'Attack' }, { name: 'Start' }] }), release: () => {} },
+  };
+}
+
+/** An ally view at (4, 9) that has its model loaded (the load is async: `await ready()`). */
+async function ally(info = {}, assets = store()) {
+  const ctx = fakeViewCtx(fake.P, { assets, cam });
+  const v = new UnitView(ctx, { id: 1, side: 'ally', kind: 'chess', defId: 'char_x', spine: 'char_x', tier: 3, x: 4, y: 9, maxHp: 1000, dir: 'RIGHT', ...info });
+  await tick(); await tick();
+  return { v, assets };
+}
+
+/** A lone target view (nothing to load: `battleView` targets are only read for x / y). */
+const at = (x, y) => ({ x, y });
+
+/** Advance the view's frame clock in 1/60 s steps (the turnaround runs in update()). */
+function run(v, seconds, dt = 1 / 60) {
+  const camera = cam();
+  for (let t = 0; t < seconds - 1e-9; t += dt) v.update(dt, camera, 0);
+}
+
+/** Feed real event tuples into the real interpolation buffer. */
+function buffer(...entries) {
+  const b = new SnapshotBuffer();
+  for (const [ev, t] of entries) b.pushEvents([ev], 0, t);
+  return b;
+}
+
+const ATK = (src, dst, kind = 'none') => ['atk', src, dst, kind];
+const multiOf = (list, id) => list.filter((g) => g.ev[1] === id).map((g) => g.multi);
+
+describe('one attack = one group (render/facing.js attackGroups)', () => {
+  test('a fast single-target attacker is NOT an area attacker: three attacks in the window are three groups', () => {
+    const b = buffer([ATK(1, 9), 0.1], [ATK(1, 9), 0.4], [ATK(1, 9), 0.7]);
+    assert.deepEqual(multiOf(attackGroups(b, 0, 1.5), 1), [false, false, false], '0.3 s apart = separate attacks');
+  });
+
+  test('a 群攻 attack is ONE group with several distinct targets — including its first target', () => {
+    const b = buffer([ATK(2, 9), 0.2], [ATK(2, 10), 0.2], [ATK(2, 11), 0.2]);
+    const groups = attackGroups(b, 0, 1.5).filter((g) => g.ev[1] === 2);
+    assert.equal(groups.length, 3);
+    assert.deepEqual(groups.map((g) => g.multi), [true, true, true], 'every event of the area attack is marked');
+  });
+
+  test('two hits on the SAME target in one tick are a single-target attack (a 连击), not 群攻', () => {
+    const b = buffer([ATK(3, 9), 0.2], [ATK(3, 9), 0.2]);
+    assert.deepEqual(multiOf(attackGroups(b, 0, 1.5), 3), [false, false]);
+  });
+
+  test('a bounce is not this unit´s own attack, and other events ride along in order (the skill state)', () => {
+    const b = buffer([ATK(4, 9, 'chain'), 0.2], [ATK(4, 10, 'chain'), 0.2], [['skill', 4, 1], 0.2]);
+    const plan = attackGroups(b, 0, 1.5);
+    assert.deepEqual(plan.map((p) => p.ev[0]), ['atk', 'atk', 'skill'], 'every queued event, in order');
+    assert.deepEqual(plan.map((p) => p.group), [null, null, null], 'neither the bounces nor the skill join a group');
+    assert.deepEqual(plan.map((p) => p.multi), [false, false, false]);
+    assert.deepEqual(attackGroups(b, 0.5, 1.5), [], 'no window → no plan');
+  });
+});
+
+describe('the turn happens when the animation starts, and only then', () => {
+  test('a fast single-target attack turns the model at the wind-up; the turnaround takes FACING_TURN_S', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    const target = at(4, 12);                       // straight up: the Back model is wanted
+    assert.equal(v.modelFlip(), 1, 'deployed facing: Front model, not mirrored');
+    const started = v.windUp(0.4, 'none');
+    assert.equal(started, true, 'the wind-up was accepted');
+    assert.equal(v.faceTarget(target, false, { lead: 0.4 }), true);
+    assert.equal(v.viewDir, 'UP');
+    assert.equal(v._flipSwap, true, 'the skeleton swap is owed at the sweep midpoint (there is room before the strike)');
+    run(v, FACING_TURN_S * 0.4);
+    assert.equal(v.entryBack, false, 'still on the Front model: the swap waits for the midpoint');
+    run(v, FACING_TURN_S * 0.2);
+    assert.equal(v.entryBack, true, '换骨架: the Back model takes over at the midpoint');
+    run(v, FACING_TURN_S);
+    assert.equal(v._flipT, 1, 'the sweep settled');
+    assert.equal(v.modelFlip(), 1, 'UP draws the Back model unmirrored');
+  });
+
+  test('a refused wind-up never turns the model', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    assert.equal(v.windUp(0.4, 'none'), true);
+    // a second attack of the same clip while this one is still playing is refused by the actor
+    assert.equal(v.windUp(0.4, 'none'), false);
+    assert.equal(v.viewDir, null, 'no turn for an attack that never started');
+  });
+
+  test('群攻 never turns — not even for its first target', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    v.windUp(0.4, 'none');
+    assert.equal(v.faceTarget(at(4, 12), true, { lead: 0.4 }), false, 'area attack: no turn');
+    assert.equal(v.viewDir, null);
+    // and the deferred onAttack path gets the same answer
+    v.onAttack(at(4, 12), 0, 'none', true);
+    assert.equal(v.viewDir, null, 'the first target of an area attack does not turn the model either');
+  });
+
+  test('a delayed batch turns immediately (before its clip starts) instead of restarting it', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    // no look-ahead left: onAttack turns with { instant: true }, then starts the clip
+    assert.equal(v.faceTarget(at(4, 12), false, { instant: true }), true);
+    assert.equal(v.entryBack, true, 'the skeleton swap is done before the clip starts');
+    assert.equal(v._flipSwap, false, 'nothing left to swap later (that would replay a clip already striking)');
+    v.onAttack(at(4, 12), 0, 'none', false);
+    assert.equal(v.viewDir, 'UP');
+  });
+});
+
+describe('held facing, and going back to the deployed direction', () => {
+  test('a stunned operator keeps its facing and does not turn', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    v.windUp(0.4, 'none');
+    v.faceTarget(at(4, 12), false, { lead: 0.4 });
+    assert.equal(v.viewDir, 'UP');
+    v.onStatus('stun', true);
+    assert.equal(v.faceTarget(at(10, 9), false, { lead: 0.4 }), false, 'no turn while stunned');
+    run(v, 2);
+    assert.equal(v.viewDir, 'UP', 'the stun clip plays in the facing the model had');
+    v.onStatus('stun', false);
+    v.actor.update(3);                       // the clip that was playing ends
+    run(v, 0.05);
+    assert.equal(v.viewDir, null, 'once it can act again and nothing attacks, it faces the deployed direction');
+  });
+
+  test('the model goes back after the attack animation ends (no fixed 3 s timer)', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    v.windUp(0.4, 'none');
+    v.faceTarget(at(4, 12), false, { lead: 0.4 });
+    run(v, 0.6);
+    assert.equal(v.viewDir, 'UP', 'still in the attack clip / its recovery');
+    // let the clip finish: the actor leaves attack mode and the revert starts
+    v.actor.update(3);
+    run(v, 0.05);
+    assert.equal(v.viewDir, null, '回正 once the attack animation is over');
+    assert.equal(v.modelFlip(), 1);
+    run(v, FACING_TURN_S);
+    await tick(); await tick();              // the Front model loads asynchronously
+    assert.equal(v.entryBack, false, 'and it is back on the Front model of the deployed RIGHT facing');
+  });
+
+  test('a new attack during the recovery keeps the facing (no flicker back and forth)', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    v.windUp(0.4, 'none');
+    v.faceTarget(at(4, 12), false, { lead: 0.4 });
+    run(v, FACING_TURN_S + 0.05);
+    v.actor.update(3);                       // clip over
+    v.windUp(0.4, 'none');                   // the next attack is already winding up
+    run(v, 0.05);
+    assert.equal(v.viewDir, 'UP', 'the next attack keeps it facing the target');
+  });
+});
+
+describe('Front / Back model switch while a skill clip is on', () => {
+  test('a skill does not drop the turned facing, and the turn still swaps Front ⇄ Back', async () => {
+    const { v } = await ally({ dir: 'RIGHT' });
+    v.setSkill(true);
+    v.windUp(0.4, 'none');
+    assert.equal(v.faceTarget(at(4, 12), false, { lead: 0.4 }), true);
+    run(v, FACING_TURN_S + 0.02);
+    assert.equal(v.entryBack, true, 'skill clip + turn: the Back skeleton still takes over');
+    assert.equal(v.viewDir, 'UP', 'the skill clip does not reset the facing');
+    v.setSkill(false);
+    assert.equal(v.viewDir, 'UP', 'and turning the skill off does not reset it either');
+    assert.equal(v.faceTarget(at(0, 9), false, { lead: 0.4 }), true, 'a new target turns it again');
+    assert.equal(v.viewDir, 'LEFT');
+  });
+});

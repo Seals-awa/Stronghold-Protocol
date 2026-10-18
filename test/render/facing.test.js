@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { facingDir, facingToward, FACING_HOLD_S } from '../../public/js/render/facing.js';
+import { facingDir, facingToward, FACING_TURN_S, HELD_FACING } from '../../public/js/render/facing.js';
 
 test('a target straight above is faced UP, straight right is RIGHT', () => {
   assert.equal(facingDir(0, 1), 'UP');
@@ -48,5 +48,6 @@ test('facingToward subtracts the two positions, and never throws on a missing on
 });
 
 test('the hold after the last attack is 3 s', () => {
-  assert.equal(FACING_HOLD_S, 3);
+  assert.equal(FACING_TURN_S, 0.15, '换骨架 + 镜像 + 换动画 takes 0.15 s');
+  assert.deepEqual(HELD_FACING, ['stun', 'sleep', 'freeze'], 'the states whose clip plays in the facing the model already has');
 });

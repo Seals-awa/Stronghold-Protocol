@@ -88,7 +88,7 @@ import { MANIFOLD, isManifold, manifoldCopyForm, manifoldAttackForm } from './ma
 import { diamondTexture, shadowTexture, fxAtlas, tierChip, statusTexture, itemTexture, hudRings, ringArc, downLabel, HUD_DISC, ELEMENT_RING } from './textures.js';
 import { COLORS, TIER_COLORS, ENEMY_FRAME, UNIT, PROJ, statusIconKey, statusIconSuppressed } from './style.js';
 import { drawCrate, rowDepthKey, ROW_KEY, deviceBoxOf, DEVICE_BOX } from './tiles.js';
-import { facingToward, FACING_HOLD_S } from './facing.js';
+import { facingToward, FACING_TURN_S, HELD_FACING } from './facing.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const DIRS = ['UP', 'RIGHT', 'DOWN', 'LEFT'];
@@ -685,9 +685,17 @@ export class UnitView {
     this.visFacing = this.isEnemy ? -1 : this.facing;
     // DISPLAY-ONLY facing (render/facing.js): the direction the MODEL is drawn in while `dir` — the deploy direction that
     // rotates the attack range, picks Front / Back and drives every directional effect — stays where the player put it.
-    // null = as `dir`. faceTarget sets it before a swing; the hold (facingFor) takes it back.
+    // null = as `dir`. `faceTarget` sets it when an attack animation starts; `update` takes it back once that animation is
+    // over and no attack follows.
     this.viewDir = null;
-    this.facingFor = 0;           // seconds left before an attack-turned model goes back to its deployed direction
+    // The turnaround (换骨架 + 镜像 + 换动画, FACING_TURN_S): `_flip` is the drawn horizontal sign the transform uses, swept
+    // from `_flipFrom` to `_flipTo` over `_flipDur` seconds; the Front ⇄ Back swap is owed at the midpoint (`_flipSwap`) so
+    // the skeleton change hides inside the sweep.
+    this._flip = this.isEnemy ? -1 : (this.dir === 'LEFT' ? -1 : 1);
+    this._flipFrom = this._flip; this._flipTo = this._flip;
+    this._flipT = 1;              // 1 = settled (no turnaround running)
+    this._flipDur = 0;
+    this._flipSwap = false;       // the Front ⇄ Back swap is still owed at the sweep's midpoint
     this.hp = Number(info.maxHp) || 1; this.maxHp = Number(info.maxHp) || 1; this.ghostHp = this.hp;
     this.sp = 0; this.spMax = 0;
     this.ammo = null;             // [rounds left, rounds in the magazine] while an ammo skill runs (sync; b.snap `ammo`)
@@ -1271,7 +1279,9 @@ export class UnitView {
 
   /** The model's horizontal draw sign: −1 when it is drawn mirrored (facing left; an enemy's own quirks applied). */
   modelFlip() {
-    return (this.isEnemy ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) : this.visFacing) * (this.mirrorX ? -1 : 1);
+    // allies draw with the swept turnaround sign (_flip, render/facing.js FACING_TURN_S); enemies keep their velocity flip
+    const sign = this.isEnemy ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) : this._flip;
+    return sign * (this.mirrorX ? -1 : 1);
   }
 
   /**
@@ -1326,44 +1336,94 @@ export class UnitView {
     this.hasDir = true;
     this.facing = d === 'LEFT' ? -1 : 1;
     this.visFacing = this.facing;
-    // a real re-orientation wins over a display-only one (and must not spring back after the hold)
+    // a real re-orientation wins over a display-only one (and must not spring back afterwards)
     this.viewDir = null;
-    this.facingFor = 0;
+    this._settleFlip();
     if (this.imp) this.imp.dirty = true;
     this._syncModel();
+  }
+
+  /** True while the official client keeps the model's facing (its stun clip plays in the facing it already has). */
+  _heldFacing() {
+    const s = this.statuses;
+    if (!s) return false;
+    for (const k of HELD_FACING) if (s.has(k)) return true;
+    return false;
+  }
+
+  /** Snap the turnaround to its end state (a deploy-direction change, or an immediate re-orientation). */
+  _settleFlip() {
+    this._flip = this.isEnemy ? this.visFacing : ((this.viewDir || this.dir) === 'LEFT' ? -1 : 1);
+    this._flipFrom = this._flip; this._flipTo = this._flip;
+    this._flipT = 1; this._flipDur = 0; this._flipSwap = false;
   }
 
   /**
-   * Turn the MODEL toward `target` (render/facing.js) — display only, `dir` / the attack range never move. Called before a
-   * swing starts: render/app.js windUpAttacks faces the unit, then winds the attack clip up, so the strike already faces
-   * the right way; `onAttack` does the same for an attack that had no look-ahead left.
-   * No turn while the operator cannot act, none for a multi-target hit (群攻: its targets differ every swing).
+   * Would the model drawn for `dir` be the Back one? (`_wantsBack` reads the current `viewDir`; this asks about another
+   * direction without moving anything.)
+   * @param {'UP'|'DOWN'|'LEFT'|'RIGHT'} dir
+   */
+  _wantsBackFor(dir) {
+    const a = this.ctx.assets;
+    const id = this.info.spine || this.info.defId;
+    if (this.isEnemy || dir !== 'UP' || !id || !a || typeof a.hasBack !== 'function' || !a.hasBack(id, this.info.skin)) return false;
+    return this.alive || dieClipDur(typeof a.spineEntry === 'function' ? a.spineEntry(id, this.info.skin ? { back: true, skin: this.info.skin } : { back: true }) : null) > 0;
+  }
+
+  /**
+   * Start the official turnaround: mirror sweep + Front ⇄ Back skeleton swap + the model's own clip, `FACING_TURN_S` long
+   * (render/facing.js). The skeleton swap is owed at the sweep's midpoint and only when there is room for it before the
+   * strike frame (`lead` > FACING_TURN_S): a last-instant turn only mirrors, so a clip that is about to strike is never
+   * restarted.
+   * @param {'UP'|'DOWN'|'LEFT'|'RIGHT'} dir
+   * @param {number} lead game seconds between the animation start and the strike
+   */
+  _startTurn(dir, lead = 0, instant = false, forceSwap = false) {
+    const swap = this._wantsBackFor(dir) !== !!this.entryBack && (instant || forceSwap || lead > FACING_TURN_S);
+    this._flipFrom = this._flip;
+    this._flipTo = dir === 'LEFT' ? -1 : 1;
+    this._flipDur = FACING_TURN_S;
+    this._flipT = 0;
+    this._flipSwap = swap && !instant;     // an instant turn swaps now, before the clip starts
+    this.visFacing = this._flipTo;
+    if (this.imp) this.imp.dirty = true;
+    if (swap && instant) this._syncModel();
+  }
+
+  /**
+   * Turn the MODEL toward `target` (render/facing.js) — display only, `dir` / the attack range never move. Called by the
+   * look-ahead right after the wind-up was ACCEPTED (render/app.js windUpAttacks) and by `onAttack` for an attack that had
+   * no look-ahead left: i.e. only when an attack animation really starts.
+   * No turn while the operator cannot act (the stun clip keeps its facing), none for a 群攻 hit (its targets differ every
+   * swing) and none for an enemy.
    * @param {{ x: number, y: number }|null} target the target's view (positions in tiles)
-   * @param {boolean} [multi] this attack hit more than one target
+   * @param {boolean} [multi] this attack hit more than one distinct target (群攻)
+   * @param {{ lead?: number }} [opts] lead = game seconds between the animation start and the strike frame
    * @returns {boolean} whether the model turned
    */
-  faceTarget(target, multi = false) {
-    if (this.isEnemy || this.destroyed) return false;
-    const held = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
-    if (held) return false;
+  faceTarget(target, multi = false, opts = {}) {
+    if (this.isEnemy || this.destroyed || multi) return false;
+    if (this._heldFacing()) return false;
     const d = facingToward(this, target);
-    if (!d) return false;
-    this.facingFor = FACING_HOLD_S;          // 3 s from the LAST attack, whether or not this one needs a turn
-    if (multi || d === (this.viewDir || this.dir)) return false;
+    if (!d || d === (this.viewDir || this.dir)) return false;
     this.viewDir = d;
-    this.visFacing = d === 'LEFT' ? -1 : 1;
-    if (this.imp) this.imp.dirty = true;
-    this._syncModel();                       // UP ⇄ something else may need the other model (Front / Back)
+    this._startTurn(d, Number(opts.lead) || 0, opts.instant === true);
     return true;
   }
 
-  /** Go back to the deployed direction (the hold expired). A no-op when the model never turned. */
+  /** 回正: go back to the deployed direction (the attack animation is over and no attack follows). */
   clearFacing() {
     if (!this.viewDir || this.isEnemy) return;
     this.viewDir = null;
-    this.visFacing = this.facing;
-    if (this.imp) this.imp.dirty = true;
-    this._syncModel();
+    this._startTurn(this.dir, 0, false, true);      // 回正: always the deployed model, no strike to protect
+  }
+
+  /** True while the model's attack clip is still playing (the facing is kept until it ends). */
+  _attackPlaying() {
+    const a = this.actor;
+    if (!a) return false;
+    if (a.mode === 'attack') return true;
+    return Number.isFinite(a.attackUntil) && a.clock < a.attackUntil;
   }
 
   _releaseEntry(entry) {
@@ -1409,7 +1469,7 @@ export class UnitView {
     } else if (target) {
       // the MODEL follows the target it hits (render/facing.js; `dir` and the range stay deployed). A wound-up attack was
       // already turned by the look-ahead (render/app.js windUpAttacks), so this is a no-op then — it restarts the hold.
-      this.faceTarget(target, multi);
+      this.faceTarget(target, multi, { instant: true });   // no look-ahead left: the clip starts at the strike frame
     }
     if (target) {
       const dx = target.x - this.x, dy = target.y - this.y, len = Math.hypot(dx, dy) || 1;
@@ -1611,14 +1671,22 @@ export class UnitView {
     const P = this.P;
     // the model for the state the frame's events and snapshot left (Front ⇄ Back when it went down / stood up: die, revive)
     if (this._modelDirty) { this._modelDirty = false; this._syncModel(); }
-    // The model that turned toward an attack (faceTarget) goes back to its deployed direction this long after the last one
-    // — counted down here, and frozen while the unit cannot act (a stunned / frozen / sleeping model must not turn back;
-    // it may only turn once it can act again).
-    if (this.facingFor > 0) {
-      const heldFace = this.statuses && (this.statuses.has('stun') || this.statuses.has('sleep') || this.statuses.has('freeze'));
-      if (!heldFace) this.facingFor -= Number.isFinite(dt) ? Math.max(0, dt) : 0;
-      if (this.facingFor <= 0) { this.facingFor = 0; this.clearFacing(); }
+    // The turnaround (render/facing.js FACING_TURN_S): sweep the drawn sign from the old facing to the new one and swap the
+    // Front ⇄ Back skeleton at the midpoint, so the model's own clip continues on the new model halfway through.
+    if (this._flipT < 1) {
+      const step = this._flipDur > 0 ? Math.max(0, dt) / this._flipDur : 1;
+      this._flipT = Math.min(1, this._flipT + step);
+      const k = this._flipT * this._flipT * (3 - 2 * this._flipT);            // smoothstep
+      this._flip = this._flipFrom + (this._flipTo - this._flipFrom) * k;
+      if (this._flipSwap && this._flipT >= 0.5) {
+        this._flipSwap = false;
+        this._syncModel();                   // 换骨架: the Front ⇄ Back model takes over with its own animation
+      }
+      if (this._flipT >= 1) this._flip = this._flipTo;
     }
+    // 回正: the attack animation is over and nothing follows → face the deployed direction again. A stunned / frozen /
+    // sleeping operator keeps the facing it had (its stun clip plays in place).
+    if (this.viewDir && !this._heldFacing() && !this._attackPlaying()) this.clearFacing();
     // a failed / timed-out model load is tried again once its wait is over (SPINE_RETRY_MS; frames only: never hidden)
     if (this._retryAt && nowMs() >= this._retryAt) { this._retryAt = 0; if (!this.actor && !this._spineBusy) this._loadSpine(true); }
     // a load begun in a hidden tab and still in flight SPINE_STUCK_MS after it came back: started again (GitHub #68)
