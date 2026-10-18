@@ -1428,6 +1428,13 @@ export class UnitView {
     // the official per-ability mode (render/faceModes.js): an animation driven by `none` / `Default` plays in whatever
     // facing the model has, `Front` never uses the Back model, and the ForceToDirection rows play a direction-specific clip
     const mode = this._faceMode();
+    if (this._faceDebug()) {
+      console.log('[face]', this.info.defId, {
+        clip: String(this.actor && this.actor.current || ''), mode: mode.row && mode.row[1] || null, flags: mode.flags,
+        skill: !!(this.statuses && this.statuses.has('skill')), skillIndex: this.info.skillIndex,
+        lead: (typeof opts !== 'undefined' ? opts.lead : undefined), viewDir: this.viewDir, dir: this.dir,
+      });
+    }
     // an enemy has no deploy direction and no Back model: it only turns left / right, toward the target it is hitting
     const aim = mode.flags.firstCast ? this._firstCastTarget(target, mode.clip) : target;
     const d = this.isEnemy ? this._enemyTurnDir(aim) : facingToward(this, aim);
@@ -1482,11 +1489,25 @@ export class UnitView {
     return { row, flags: faceModeFlags(row?.[1]), clip };
   }
 
+  /** Opt-in field debug (`localStorage.SP_FACE_DEBUG = 1`): one line per second about the facing decision. */
+  _faceDebug() {
+    try {
+      if (globalThis.localStorage?.getItem('SP_FACE_DEBUG') !== '1') return false;
+    } catch { return false; }
+    const now = Date.now();
+    if (now - (this._faceDebugAt || 0) < 1000) return false;
+    this._faceDebugAt = now;
+    return true;
+  }
+
   /** The animation names of the skill running now (`Skill_2_Loop`, `Skill_2`, `Skill_Loop`), or none. */
   _skillClipCandidates() {
     if (!this.statuses || !this.statuses.has('skill')) return [];
-    const n = Number(this.info && this.info.skillIndex);
     const out = [];
+    // what the skeleton will actually play for this unit's skill (the manifest names it, e.g. 閲庨瑑 S2 = `Skill_2`)
+    const sk = this.actor && this.actor.roles && this.actor.roles.skill;
+    if (sk) for (const k of ['loop', 'begin', 'end', 'idle']) if (typeof sk[k] === 'string' && sk[k]) out.push(sk[k]);
+    const n = Number(this.info && this.info.skillIndex);
     if (Number.isInteger(n) && n > 0) out.push(`Skill_${n}_Loop`, `Skill_${n}`);
     out.push('Skill_Loop', 'Skill');
     return out;
@@ -1658,6 +1679,13 @@ export class UnitView {
     // direction for the whole skill: turn back now instead of waiting for an attack to notice
     if (on && this.viewDir) {
       const mode = this._faceMode();
+    if (this._faceDebug()) {
+      console.log('[face]', this.info.defId, {
+        clip: String(this.actor && this.actor.current || ''), mode: mode.row && mode.row[1] || null, flags: mode.flags,
+        skill: !!(this.statuses && this.statuses.has('skill')), skillIndex: this.info.skillIndex,
+        lead: (typeof opts !== 'undefined' ? opts.lead : undefined), viewDir: this.viewDir, dir: this.dir,
+      });
+    }
       if (mode.flags.none || mode.flags.def) this.clearFacing();
     }
   }
