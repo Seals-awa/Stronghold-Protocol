@@ -137,9 +137,9 @@ export function faceModeFor(rows, candidates) {
     if (Array.isArray(row) && !row[0] && !fallback) { fallback = row; break; }
   }
   for (const cand of candidates) {
-    const name = String(cand || '');
+    const name = String(cand || '').toLowerCase();
     if (!name) continue;
-    for (const row of rows) if (Array.isArray(row) && row[0] === name) return row;
+    for (const row of rows) if (Array.isArray(row) && String(row[0]).toLowerCase() === name) return row;
   }
   // soft match: a row whose animKey is a prefix of a candidate (Skill_2 covers Skill_2_Loop), longest row key first
   const list = candidates.map((c) => String(c || '')).filter(Boolean);

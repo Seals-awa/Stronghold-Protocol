@@ -1465,8 +1465,9 @@ export class UnitView {
     // a skill that is running drives the facing (閲庨瑑 S2 / 娣卞贰 S2 are `Default`: the model keeps the deployed direction);
     // otherwise the attack clip that is about to start does, then whatever is playing now
     const attack = this._attackClipName();
-    // the clip PLAYING now outranks the attack clip while a skill runs: the skill loop is what the table names
-    const candidates = [...skill, clip, attack, 'Attack'].filter(Boolean);
+    // THE CLIP PLAYING NOW IS GROUND TRUTH (its row must win), then the skill names as a fallback for a clip the
+    // table does not name, then the attack clip the next wind-up would play
+    const candidates = [clip, ...skill, attack, 'Attack'].filter(Boolean);
     const row = faceModeFor(this.faceRows, candidates);
     return { row, flags: faceModeFlags(row?.[1]), clip };
   }
