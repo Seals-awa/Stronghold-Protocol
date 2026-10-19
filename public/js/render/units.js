@@ -698,6 +698,8 @@ export class UnitView {
     this._flipDur = 0;
     this._flipSwap = false;       // the Front ⇄ Back swap is still owed at the sweep's midpoint
     this._flipDir = this.dir || 'RIGHT';      // the direction the running sweep heads for
+    this._flipSquash = 1;                     // 1 -> 0 -> 1 across a skeleton-changing turn (edge-on at the swap)
+    this._flipSquashOn = false;
     this._walkSign = null;        // the sign an enemy walks in (set from its velocity; the turn goes back to it)
     this._skillCastSeen = false;  // whether the running skill has already attacked once (FirstCastTarget rows)
     this._pendingAttack = null;   // the attack a Front 鈬?Back swap has to resume on the new model
@@ -1398,7 +1400,7 @@ export class UnitView {
       ? (ENEMY_MODEL_FACES_LEFT ? -this.visFacing : this.visFacing) * (this.mirrorX ? -1 : 1)
       : ((this.viewDir || this.dir) === 'LEFT' ? -1 : 1);
     this._flipFrom = this._flip; this._flipTo = this._flip;
-    this._flipT = 1; this._flipDur = 0; this._flipSwap = false;
+    this._flipT = 1; this._flipDur = 0; this._flipSwap = false; this._flipSquash = 1; this._flipSquashOn = false;
   }
 
   /**
@@ -1426,6 +1428,9 @@ export class UnitView {
     this._flipFrom = Number.isFinite(from) ? from : this._flip;
     this._flipTo = dir === 'LEFT' ? -1 : 1;
     this._flipDir = dir;                     // the direction this sweep is heading for (a retarget can already be there)
+    // a turn that changes the SKELETON (UP / DOWN: the mirror sign stays the same) still has to be visible: the model is
+    // squeezed edge-on across the sweep, and the skeleton swap sits at the narrowest point
+    this._flipSquashOn = swap;
     // The turnaround is a FIXED 0.15 GAME seconds (the official client's turn animation), advanced with the animation clock
     // (see update): at the renderer's ~2 game-s per real second that is ~0.075 real s. Only a turn with no lead at all (an
     // event that arrived late) is instant - there is no sweep left to run before the strike.
@@ -1917,11 +1922,13 @@ export class UnitView {
       this._flipT = Math.min(1, this._flipT + step);
       const k = this._flipT * this._flipT * (3 - 2 * this._flipT);            // smoothstep
       this._flip = this._flipFrom + (this._flipTo - this._flipFrom) * k;
+      // edge-on at the middle: what makes a UP / DOWN turn (same mirror sign) read as a turn instead of a snap
+      this._flipSquash = this._flipSquashOn ? Math.abs(1 - 2 * k) : 1;
       if (this._flipSwap && this._flipT >= 0.5) {
         this._flipSwap = false;
         this._syncModel();                   // 换骨架: the Front ⇄ Back model takes over with its own animation
       }
-      if (this._flipT >= 1) this._flip = this._flipTo;
+      if (this._flipT >= 1) { this._flip = this._flipTo; this._flipSquash = 1; this._flipSquashOn = false; }
     }
     // 回正: the attack animation is over and nothing follows → face the deployed direction again. A stunned / frozen /
     // sleeping operator keeps the facing it had (its stun clip plays in place).
@@ -2574,7 +2581,7 @@ export class UnitView {
   _drawDirect(sc, flip, tint, animDt, held, posed = false) {
     const sp = this.actor.spine;
     sp.alpha = this.swapT;
-    sp.scale.set(sc * flip, sc * this.modelKY);
+    sp.scale.set(sc * flip * this._flipSquash, sc * this.modelKY);
     if (!posed) {
       if (held) this.actor.clock += animDt;
       else this.actor.update(animDt);
@@ -2625,7 +2632,7 @@ export class UnitView {
       this._renderImpostor(sc, atlas);
     }
     const k = imp.sc > 0 ? sc / imp.sc : 1;
-    imp.sprite.scale.set(k * flip, k);
+    imp.sprite.scale.set(k * flip * this._flipSquash, k);
     imp.sprite.alpha = this.swapT;
     imp.sprite.tint = tint;
   }
