@@ -5,9 +5,8 @@
 // `Attack_A`, …). The renderer has to find that row at runtime from the clip names it can see, so this script simulates
 // that lookup for skill 1..3 of every operator and reports where the answer differs from the row the table names.
 import { FACE_MODES } from '../public/js/render/faceModes.js';
-import { faceModeFor, faceModeFlags } from '../public/js/render/facing.js';
+import { faceModeFor } from '../public/js/render/facing.js';
 
-const SKILL_SUFFIX = /_(Loop|Begin|End|Idle|Daze|Attack|Down|Up)$/;
 const stem = (name) => String(name || '').replace(/(_(Loop|Begin|End|Idle|Daze|Attack))+$/, '').replace(/_(Down|Up)$/, '');
 
 /** The row the table names for one skill index (by animation STEM, the longest match). */
